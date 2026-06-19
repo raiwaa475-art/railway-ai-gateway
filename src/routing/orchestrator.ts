@@ -46,7 +46,10 @@ export class OrchestratorService {
 
             const deepseekData = await deepseekRes.json();
             console.log("[Orchestrator] DeepSeek raw response data:", JSON.stringify(deepseekData));
-            const planText = deepseekData.content?.[0]?.text || "";
+            const textBlock = Array.isArray(deepseekData.content)
+                ? deepseekData.content.find((block: any) => block?.type === "text")
+                : null;
+            const planText = textBlock?.text || "";
             console.log("[Orchestrator] Plan generated successfully. Length:", planText.length);
 
             // Step 3: Reconstruct Payload
