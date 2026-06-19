@@ -100,6 +100,78 @@ function isLikelyCodeEditTask(text: string): boolean {
     return /(^|[\s./\\_-])(tsx?|jsx?)(\b|$)/i.test(normalized);
 }
 
+function isContinuationIntent(text: string): boolean {
+    const normalized = String(text || "").trim().toLowerCase();
+    if (!normalized) return false;
+
+    const continuationPhrases = [
+        "ต่อ",
+        "ทำต่อ",
+        "ต่อเลย",
+        "แก้ต่อ",
+        "จัด",
+        "เอาเลย",
+        "ok",
+        "okay",
+        "continue",
+        "go on",
+        "proceed",
+        "do it",
+        "apply it"
+    ];
+
+    return continuationPhrases.includes(normalized);
+}
+
+function isReadOnlyIntent(text: string): boolean {
+    const normalized = String(text || "").toLowerCase();
+    const readOnlyPatterns = [
+        "explain",
+        "summarize",
+        "review only",
+        "planning only",
+        "plan only",
+        "do not edit",
+        "don't edit",
+        "no edit",
+        "read only",
+        "ไม่ต้องแก้",
+        "อย่าแก้",
+        "ห้ามแก้"
+    ];
+    return readOnlyPatterns.some(pattern => normalized.includes(pattern));
+}
+
+
+function getUserTextFromMessage(msg: any): string {
+    if (msg?.role !== "user") return "";
+
+    if (typeof msg.content === "string") {
+        return msg.content.trim();
+    }
+
+    if (Array.isArray(msg.content)) {
+        return msg.content
+            .filter((block: any) => block?.type === "text")
+            .map((block: any) => String(block.text || ""))
+            .join("\n")
+            .trim();
+    }
+
+    return "";
+}
+
+function getRecentCodeEditInstruction(messages: any[]): string {
+    for (const msg of messages.slice(-12).reverse()) {
+        const text = getUserTextFromMessage(msg);
+        if (text && isLikelyCodeEditTask(text)) {
+            return text;
+        }
+    }
+
+    return "";
+}
+
 function hasUsefulCodeContext(messages: any[]): boolean {
     const codeContextMarkers = [
         "function",
@@ -136,6 +208,10 @@ interface DeterministicRouterDecision {
     delegate_to_qwen: boolean;
     reason: string;
     userIntentPreview: string;
+    latestUserIntentPreview: string;
+    recoveredCodeEditIntentPreview: string;
+    inheritedCodeEditIntent: boolean;
+    continuationIntent: boolean;
     likelyCodeEdit: boolean;
     usefulCodeContext: boolean;
 }
@@ -242,23 +318,41 @@ function shouldRetryQwenDraft(mode: QwenDraftMode, chars: number): boolean {
 function shouldDelegateToQwen(messages: any[]): DeterministicRouterDecision {
     const hasResults = hasToolResults(messages);
     const userIntent = getLastRealUserInstruction(messages);
-    const likelyCodeEdit = isLikelyCodeEditTask(userIntent);
     const usefulCodeContext = hasUsefulCodeContext(messages);
+    const latestIsCodeEdit = isLikelyCodeEditTask(userIntent);
+    const continuationIntent = isContinuationIntent(userIntent);
+    const readOnlyIntent = isReadOnlyIntent(userIntent) && !continuationIntent;
+    const recentCodeEditInstruction = getRecentCodeEditInstruction(messages);
+    const canRecoverIntent = hasResults && usefulCodeContext && !!recentCodeEditInstruction && !readOnlyIntent;
+    const inheritedCodeEditIntent = canRecoverIntent && !latestIsCodeEdit;
+    const likelyCodeEdit = latestIsCodeEdit ||
+        (continuationIntent && canRecoverIntent) ||
+        canRecoverIntent;
     const delegate_to_qwen = hasResults && likelyCodeEdit && usefulCodeContext;
 
     let reason = "Deterministic router approved Qwen delegation";
     if (!hasResults) {
         reason = "No tool_result context yet";
-    } else if (!likelyCodeEdit) {
-        reason = "Latest user intent is not a code edit task";
     } else if (!usefulCodeContext) {
         reason = "Tool results do not contain useful code context";
+    } else if (!likelyCodeEdit) {
+        reason = "Latest user intent is not a code edit task";
+    } else if (inheritedCodeEditIntent) {
+        reason = continuationIntent
+            ? "Recovered code edit intent from recent conversation continuation"
+            : "Recovered code edit intent from recent conversation with tool context";
     }
+
+    const effectiveUserIntent = latestIsCodeEdit ? userIntent : (recentCodeEditInstruction || userIntent);
 
     return {
         delegate_to_qwen,
         reason,
-        userIntentPreview: userIntent.slice(0, 120),
+        userIntentPreview: effectiveUserIntent.slice(0, 120),
+        latestUserIntentPreview: userIntent.slice(0, 120),
+        recoveredCodeEditIntentPreview: recentCodeEditInstruction.slice(0, 120),
+        inheritedCodeEditIntent,
+        continuationIntent,
         likelyCodeEdit,
         usefulCodeContext
     };
@@ -1256,6 +1350,10 @@ Expected JSON shape:
                 mode: "hybrid-flow",
                 hasToolResults: hasResults,
                 delegate_to_qwen: false,
+                latestUserIntentPreview: decision.latestUserIntentPreview,
+                recoveredCodeEditIntentPreview: decision.recoveredCodeEditIntentPreview,
+                inheritedCodeEditIntent: decision.inheritedCodeEditIntent,
+                continuationIntent: decision.continuationIntent,
                 qwenPatchMode: "find_replace",
                 qwenPatchValid: true,
                 deepseekApprovalUsed: false,
@@ -1276,6 +1374,10 @@ Expected JSON shape:
                 likelyCodeEdit: decision.likelyCodeEdit,
                 usefulCodeContext: decision.usefulCodeContext,
                 delegate_to_qwen: false,
+                latestUserIntentPreview: decision.latestUserIntentPreview,
+                recoveredCodeEditIntentPreview: decision.recoveredCodeEditIntentPreview,
+                inheritedCodeEditIntent: decision.inheritedCodeEditIntent,
+                continuationIntent: decision.continuationIntent,
                 qwenDraftUsed: false,
                 qwenDraftMode: "empty",
                 qwenDraftChars: 0,
@@ -1301,6 +1403,10 @@ Expected JSON shape:
                 likelyCodeEdit: decision.likelyCodeEdit,
                 usefulCodeContext: decision.usefulCodeContext,
                 delegate_to_qwen: true,
+                latestUserIntentPreview: decision.latestUserIntentPreview,
+                recoveredCodeEditIntentPreview: decision.recoveredCodeEditIntentPreview,
+                inheritedCodeEditIntent: decision.inheritedCodeEditIntent,
+                continuationIntent: decision.continuationIntent,
                 qwenDraftUsed: false,
                 qwenDraftMode: "empty",
                 qwenDraftChars: 0,
@@ -1320,7 +1426,11 @@ Expected JSON shape:
         const activeModelName = resolvedConfig.modelName;
         const qwenMaxTokens = clampNumber(config.qwenLocalMaxTokens ?? 32000, 512, 32000);
 
-        const userIntent = getLastRealUserInstruction(messages);
+        const latestUserIntent = getLastRealUserInstruction(messages);
+        const recoveredCodeEditIntent = getRecentCodeEditInstruction(messages);
+        const userIntent = decision.inheritedCodeEditIntent && recoveredCodeEditIntent
+            ? recoveredCodeEditIntent
+            : latestUserIntent;
         const reducedContext = extractReducedContext(messages, userIntent);
         const reducedContextChars = reducedContext.length;
 
@@ -1393,6 +1503,7 @@ END_LINE: <last line number>
 REPLACE: <replacement code without line numbers>
 
 Rules:
+- Return ONLY line-range format. Do not return unified diff. Do not use --- +++ @@.
 - Choose the smallest safe line range.
 - START_LINE and END_LINE must exist in ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS.
 - Never invent line numbers.
@@ -1475,7 +1586,9 @@ Latest user intent preview: ${decision.userIntentPreview}`
                 qwenInputTokens = qwenResult.inputTokens;
                 qwenOutputTokens = qwenResult.outputTokens;
 
-                let patchCheck = validateQwenPatch(parseQwenFindReplacePatch(draftText, rawFileContent), messages, userIntent, rawFileContent, hasExactOriginalFileContent, fileContextSource);
+                let patchCheck = hasExactOriginalFileContent && qwenDraftMode === "unified_diff"
+                    ? { ok: false, mode: "unified_diff" as const, reason: "unified_diff" }
+                    : validateQwenPatch(parseQwenFindReplacePatch(draftText, rawFileContent), messages, userIntent, rawFileContent, hasExactOriginalFileContent, fileContextSource);
 
                 const failedReasons = [
                     "patch_parse_unsupported",
@@ -1486,6 +1599,7 @@ Latest user intent preview: ${decision.userIntentPreview}`
                     "empty_patch",
                     "not_parsed",
                     "find_block_not_found_in_context",
+                    "find_block_matches_multiple",
                     "line_range_find_not_found",
                     "line_range_find_matches_multiple",
                     "line_range_invalid_numbers",
@@ -1511,11 +1625,13 @@ END_LINE: <number between START_LINE and ${totalLineCount}>
 REPLACE: <replacement code>
 
 Rules:
+- FILE must exactly equal ${targetFile}.
 - Use only line numbers that exist in ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS.
 - Choose the smallest safe line range.
 - Do not include line numbers in REPLACE.
 - Do not use FIND/REPLACE.
 - Do not use unified diff.
+- Do not use --- +++ @@.
 - Do not include markdown.
 - Do not explain.`;
                     } else if (!patchCheck.ok && failedReasons.includes(patchCheck.reason || "")) {
@@ -1537,6 +1653,7 @@ Rules:
 - Do not include line numbers in REPLACE.
 - Do not use FIND/REPLACE.
 - Do not use unified diff.
+- Do not use --- +++ @@.
 - Do not include markdown.
 - Do not explain.`;
                             } else if (patchCheck.reason === "file_mismatch") {
@@ -1555,6 +1672,26 @@ Rules:
 - Do not include line numbers in REPLACE.
 - Do not use FIND/REPLACE.
 - Do not use unified diff.
+- Do not use --- +++ @@.
+- Do not include markdown.
+- Do not explain.`;
+                            } else if ((patchCheck.reason || "").includes("find_block_not_found_in_context") || (patchCheck.reason || "").includes("find_block_matches_multiple")) {
+                                retryPrompt = `Your previous patch used a FIND block that does not match the exact file context.
+Return ONLY line-range format.
+
+FILE: ${targetFile}
+START_LINE: <number from ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS>
+END_LINE: <number from ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS>
+REPLACE: <replacement code>
+
+Rules:
+- FILE must exactly equal ${targetFile}.
+- START_LINE and END_LINE must be from the numbered file.
+- REPLACE must not include line numbers.
+- Choose the smallest safe line range.
+- Do not use FIND/REPLACE.
+- Do not use unified diff.
+- Do not use --- +++ @@.
 - Do not include markdown.
 - Do not explain.`;
                             } else {
@@ -1572,6 +1709,7 @@ Rules:
 - Do not include line numbers in REPLACE.
 - Do not use FIND/REPLACE.
 - Do not use unified diff.
+- Do not use --- +++ @@.
 - Do not include markdown.
 - Do not explain.`;
                             }
@@ -1626,7 +1764,9 @@ Rules:
         }
 
         if (draftText) {
-            parsedPatch = validateQwenPatch(parseQwenFindReplacePatch(draftText, rawFileContent), messages, userIntent, rawFileContent, hasExactOriginalFileContent, fileContextSource);
+            parsedPatch = hasExactOriginalFileContent && qwenDraftMode === "unified_diff"
+                ? { ok: false, mode: "invalid", reason: "unified_diff" }
+                : validateQwenPatch(parseQwenFindReplacePatch(draftText, rawFileContent), messages, userIntent, rawFileContent, hasExactOriginalFileContent, fileContextSource);
             qwenPatchValid = parsedPatch.ok;
             qwenPatchReason = parsedPatch.reason || (parsedPatch.ok ? "valid" : "invalid_patch");
         } else {
@@ -1699,6 +1839,10 @@ Rules:
                 requestId,
                 mode: "hybrid-flow",
                 delegate_to_qwen: true,
+                latestUserIntentPreview: decision.latestUserIntentPreview,
+                recoveredCodeEditIntentPreview: decision.recoveredCodeEditIntentPreview,
+                inheritedCodeEditIntent: decision.inheritedCodeEditIntent,
+                continuationIntent: decision.continuationIntent,
                 qwenPatchMode: parsedPatch.mode,
                 qwenPatchValid: true,
                 qwenPatchReason,
@@ -1797,6 +1941,10 @@ ${forwardedDraftText}
             likelyCodeEdit: decision.likelyCodeEdit,
             usefulCodeContext: decision.usefulCodeContext,
             delegate_to_qwen: true,
+            latestUserIntentPreview: decision.latestUserIntentPreview,
+            recoveredCodeEditIntentPreview: decision.recoveredCodeEditIntentPreview,
+            inheritedCodeEditIntent: decision.inheritedCodeEditIntent,
+            continuationIntent: decision.continuationIntent,
             qwenDraftUsed,
             qwenDraftMode,
             qwenDraftChars,
