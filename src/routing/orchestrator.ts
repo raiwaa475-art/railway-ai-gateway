@@ -37,6 +37,25 @@ function extractReducedContext(messages: any[], maxChars = 8000): string {
     return parts.join("\n\n---\n\n").slice(-maxChars);
 }
 
+function extractJsonFromString(str: string): any {
+    // Remove think blocks and special tags if any
+    let cleaned = str.replace(/<think>[\s\S]*?<\/think>/gi, "");
+    cleaned = cleaned.replace(/<｜｜DSML｜｜thought>[\s\S]*?<\/thought>/gi, "");
+    cleaned = cleaned.replace(/<｜｜DSML｜｜thought>/g, ""); // strip raw prefix tags if not closed
+    cleaned = cleaned.replace(/<\|[\s\S]*?\|>/g, ""); // strip other special tokens
+
+    // Locate the first { and the last }
+    const firstBrace = cleaned.indexOf("{");
+    const lastBrace = cleaned.lastIndexOf("}");
+
+    if (firstBrace === -1 || lastBrace === -1 || lastBrace < firstBrace) {
+        throw new Error("Could not find a valid JSON object block in model response: " + str.slice(0, 100));
+    }
+
+    const jsonSub = cleaned.substring(firstBrace, lastBrace + 1);
+    return JSON.parse(jsonSub);
+}
+
 interface RouterDecision {
     delegate_to_qwen: boolean;
     task_type: string;
@@ -99,17 +118,12 @@ Output format exactly:
         const data = await res.json();
         let text = "";
         if (Array.isArray(data.content)) {
-            const textBlock = data.content.find((b: any) => b?.type === "text");
-            text = textBlock?.text || "";
+            const textBlock = data.content.find((b: any) => b?.type === "text") ||
+                              data.content.find((b: any) => b?.type === "thinking");
+            text = textBlock?.text || textBlock?.thinking || "";
         }
 
-        // Clean markdown code blocks if any
-        let cleanText = text.trim();
-        if (cleanText.startsWith("```")) {
-            cleanText = cleanText.replace(/^```json\s*/i, "").replace(/```$/, "").trim();
-        }
-
-        const decision: RouterDecision = JSON.parse(cleanText);
+        const decision: RouterDecision = extractJsonFromString(text);
 
         // Log delegation router model call
         const inputTokens = data.usage?.input_tokens || 0;
