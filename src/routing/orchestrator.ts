@@ -13,38 +13,6 @@ function hasToolResults(messages: any[]): boolean {
     });
 }
 
-function isCodeTask(text: string): boolean {
-    const keywords = [
-        "แก้", "เขียน", "เพิ่ม", "ลบ", "เปลี่ยน", "refactor",
-        "fix", "implement", "edit", "update", "patch", "code",
-        "bug", "error", "test", "build",
-        "ทำ", "ปรับ", "เปลี่ยนสี", "แก้ไข", "สร้าง", "ใส่", "ลบออก", "เพิ่ม route", "เพิ่ม endpoint"
-    ];
-    return keywords.some(k => text.toLowerCase().includes(k.toLowerCase()));
-}
-
-function getLastHumanInstruction(messages: any[]): string {
-    for (let i = messages.length - 1; i >= 0; i--) {
-        const msg = messages[i];
-        if (msg.role !== "user") continue;
-
-        if (typeof msg.content === "string" && msg.content.trim()) {
-            return msg.content;
-        }
-
-        if (Array.isArray(msg.content)) {
-            const text = msg.content
-                .filter((block: any) => block?.type === "text")
-                .map((block: any) => block.text || "")
-                .join("\n")
-                .trim();
-
-            if (text) return text;
-        }
-    }
-    return "";
-}
-
 function extractReducedContext(messages: any[], maxChars = 8000): string {
     const parts: string[] = [];
 
@@ -69,7 +37,99 @@ function extractReducedContext(messages: any[], maxChars = 8000): string {
     return parts.join("\n\n---\n\n").slice(-maxChars);
 }
 
+interface RouterDecision {
+    delegate_to_qwen: boolean;
+    task_type: string;
+    reason: string;
+    qwen_instruction: string;
+}
+
 export class OrchestratorService {
+    private static async askDeepSeekDelegationRouter(
+        messages: any[],
+        clientHeaders: Record<string, string>,
+        requestId: string
+    ): Promise<RouterDecision> {
+        const deepseekProvider = providerRegistry.getProvider("deepseek") as DeepSeekProvider;
+        if (!deepseekProvider) {
+            throw new Error("DeepSeek provider not registered.");
+        }
+
+        const routerPrompt = `You are the delegation router for a coding gateway.
+Decide whether the current request should call Qwen Local as an internal code draft generator.
+
+Rules:
+- Return JSON only. Do not wrap in markdown blocks, just return raw JSON string.
+- delegate_to_qwen=true only when:
+  1. the user wants code to be written, edited, fixed, refactored, or generated
+  2. there is enough file/tool context for Qwen to draft a useful patch
+  3. Qwen does not need to call tools itself
+- delegate_to_qwen=false when:
+  - user is just chatting
+  - user only asks to read/explain/summarize
+  - more files must be read first
+  - the task is architecture/planning/review only
+  - tool context is missing or insufficient
+
+Output format exactly:
+{
+  "delegate_to_qwen": boolean,
+  "task_type": "chat" | "read" | "explain" | "code_edit" | "debug" | "test" | "review" | "unknown",
+  "reason": "short reason",
+  "qwen_instruction": "short instruction for Qwen if delegate_to_qwen is true"
+}`;
+
+        const body = {
+            model: config.defaultModel,
+            system: routerPrompt,
+            messages: messages,
+            stream: false,
+            max_tokens: 256,
+            temperature: 0.1
+        };
+
+        const startTime = Date.now();
+        const res = await deepseekProvider.handleRequest(body, clientHeaders);
+        const latencyMs = Date.now() - startTime;
+
+        if (!res.ok) {
+            throw new Error(`Delegation router request failed with status ${res.status}`);
+        }
+
+        const data = await res.json();
+        let text = "";
+        if (Array.isArray(data.content)) {
+            const textBlock = data.content.find((b: any) => b?.type === "text");
+            text = textBlock?.text || "";
+        }
+
+        // Clean markdown code blocks if any
+        let cleanText = text.trim();
+        if (cleanText.startsWith("```")) {
+            cleanText = cleanText.replace(/^```json\s*/i, "").replace(/```$/, "").trim();
+        }
+
+        const decision: RouterDecision = JSON.parse(cleanText);
+
+        // Log delegation router model call
+        const inputTokens = data.usage?.input_tokens || 0;
+        const outputTokens = data.usage?.output_tokens || 0;
+        const cacheReadTokens = data.usage?.cache_read_input_tokens || 0;
+
+        await insertModelCall({
+            requestId,
+            provider: "deepseek",
+            model: `${config.defaultModel}-router`,
+            inputTokens,
+            outputTokens,
+            cacheHitInputTokens: cacheReadTokens,
+            cacheMissInputTokens: inputTokens - cacheReadTokens,
+            latencyMs
+        });
+
+        return decision;
+    }
+
     private static async forwardToDeepSeek(
         body: any,
         clientHeaders: Record<string, string>,
@@ -197,35 +257,60 @@ export class OrchestratorService {
 
         const messages = req.body.messages || [];
         const hasResults = hasToolResults(messages);
-        const lastUserText = getLastHumanInstruction(messages);
-        const isCode = isCodeTask(lastUserText);
-
         const isStream = !!req.body.stream;
 
-        // If not eligible (no tool results yet or not a code task), pass-through to DeepSeek directly
-        if (!hasResults || !isCode) {
+        // 1. If no tool results yet, pass-through directly
+        if (!hasResults) {
             console.log(JSON.stringify({
                 time: new Date().toISOString(),
                 requestId,
                 mode: "hybrid-flow",
-                hasToolResults: hasResults,
-                codeTask: isCode,
-                qwenDraftUsed: false,
+                hasToolResults: false,
+                delegate_to_qwen: false,
                 finalProvider: "deepseek"
             }));
             await this.forwardToDeepSeek(req.body, clientHeaders, res, isStream, requestId);
             return;
         }
 
-        // Qwen internal coder flow
+        // 2. Ask DeepSeek Delegation Router
+        let decision: RouterDecision = {
+            delegate_to_qwen: false,
+            task_type: "unknown",
+            reason: "fallback",
+            qwen_instruction: ""
+        };
+
+        try {
+            decision = await this.askDeepSeekDelegationRouter(messages, clientHeaders, requestId);
+        } catch (err: any) {
+            console.error("Delegation router failure, falling back to DeepSeek:", err.message);
+        }
+
+        // 3. If router says false, pass-through directly
+        if (!decision.delegate_to_qwen) {
+            console.log(JSON.stringify({
+                time: new Date().toISOString(),
+                requestId,
+                mode: "hybrid-flow",
+                hasToolResults: true,
+                delegate_to_qwen: false,
+                reason: decision.reason,
+                finalProvider: "deepseek"
+            }));
+            await this.forwardToDeepSeek(req.body, clientHeaders, res, isStream, requestId);
+            return;
+        }
+
+        // 4. Qwen internal coder flow
         const qwenProvider = providerRegistry.getProvider("qwen-local") as QwenLocalProvider;
         if (!qwenProvider) {
             console.log(JSON.stringify({
                 time: new Date().toISOString(),
                 requestId,
                 mode: "hybrid-flow",
-                hasToolResults: hasResults,
-                codeTask: isCode,
+                hasToolResults: true,
+                delegate_to_qwen: true,
                 qwenDraftUsed: false,
                 qwenErrorType: "not_registered",
                 finalProvider: "deepseek"
@@ -248,7 +333,7 @@ Do not explain broadly.`,
             messages: [
                 {
                     role: "user",
-                    content: `Context:\n${reducedContext}\n\nTask: Draft a coding solution/patch.`
+                    content: `Context:\n${reducedContext}\n\nTask: ${decision.qwen_instruction}`
                 }
             ],
             stream: false,
@@ -323,8 +408,8 @@ Do not explain broadly.`,
             time: new Date().toISOString(),
             requestId,
             mode: "hybrid-flow",
-            hasToolResults: hasResults,
-            codeTask: isCode,
+            hasToolResults: true,
+            delegate_to_qwen: true,
             qwenDraftUsed,
             qwenErrorType,
             reducedContextChars,
