@@ -35,6 +35,9 @@ export class OrchestratorService {
                 system: plannerSystemPrompt,
                 stream: false
             };
+            // Omit tools from planning phase so DeepSeek generates a text plan instead of invoking tools
+            if (deepseekBody.tools) delete deepseekBody.tools;
+            if (deepseekBody.tool_choice) delete deepseekBody.tool_choice;
 
             const deepseekRes = await deepseekProvider.handleRequest(deepseekBody, clientHeaders);
             if (!deepseekRes.ok) {
