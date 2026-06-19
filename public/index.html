@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Railway AI Gateway Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --card-bg: rgba(20, 26, 46, 0.6);
+            --card-border: rgba(255, 255, 255, 0.08);
+            --accent-color: #3b82f6;
+            --accent-glow: rgba(59, 130, 246, 0.35);
+            --success-color: #10b981;
+            --success-glow: rgba(16, 185, 129, 0.3);
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-start;
+            padding: 2rem 1rem;
+            overflow-x: hidden;
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(59, 130, 246, 0.1) 0px, transparent 50%),
+                radial-gradient(at 100% 100%, rgba(16, 185, 129, 0.05) 0px, transparent 50%);
+        }
+
+        header {
+            width: 100%;
+            max-width: 1200px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--card-border);
+        }
+
+        h1 {
+            font-size: 1.8rem;
+            font-weight: 600;
+            background: linear-gradient(135deg, #fff 30%, #a5b4fc 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        select, button, input {
+            background-color: rgba(17, 24, 39, 0.8);
+            border: 1px solid var(--card-border);
+            color: var(--text-main);
+            padding: 0.6rem 1.2rem;
+            border-radius: 8px;
+            font-family: inherit;
+            font-size: 0.9rem;
+            outline: none;
+            transition: all 0.2s ease-in-out;
+        }
+
+        select:hover, button:hover {
+            border-color: var(--accent-color);
+            cursor: pointer;
+        }
+
+        button.primary {
+            background-color: var(--accent-color);
+            border-color: var(--accent-color);
+            font-weight: 500;
+        }
+
+        button.primary:hover {
+            box-shadow: 0 0 15px var(--accent-glow);
+            transform: translateY(-1px);
+        }
+
+        .dashboard-container {
+            width: 100%;
+            max-width: 1200px;
+            display: none; /* Shown dynamically */
+            flex-direction: column;
+            gap: 2rem;
+        }
+
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .card {
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            overflow: hidden;
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s;
+        }
+
+        .card:hover {
+            transform: translateY(-4px);
+            border-color: rgba(255, 255, 255, 0.15);
+        }
+
+        .card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 4px;
+            height: 100%;
+            background-color: var(--accent-color);
+        }
+
+        .card.saving::before {
+            background-color: var(--success-color);
+        }
+
+        .card-title {
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            margin-bottom: 0.8rem;
+        }
+
+        .card-value {
+            font-size: 1.8rem;
+            font-weight: 700;
+            margin-bottom: 0.4rem;
+        }
+
+        .card-sub {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        .recent-section {
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            padding: 1.5rem;
+        }
+
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+        }
+
+        .table-wrapper {
+            width: 100%;
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 0.9rem;
+        }
+
+        th, td {
+            padding: 1rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        th {
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        tr:hover td {
+            background-color: rgba(255, 255, 255, 0.02);
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.6rem;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .badge.deepseek {
+            background-color: rgba(59, 130, 246, 0.15);
+            color: #60a5fa;
+            border: 1px solid rgba(59, 130, 246, 0.3);
+        }
+
+        .badge.qwen {
+            background-color: rgba(16, 185, 129, 0.15);
+            color: #34d399;
+            border: 1px solid rgba(16, 185, 129, 0.3);
+        }
+
+        .auth-container {
+            width: 100%;
+            max-width: 420px;
+            margin-top: 10vh;
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--card-border);
+            border-radius: 20px;
+            padding: 2.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.4);
+        }
+
+        .auth-container h2 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            text-align: center;
+        }
+
+        .auth-container input {
+            width: 100%;
+            padding: 0.8rem 1rem;
+            font-size: 1rem;
+        }
+
+        .auth-container button {
+            width: 100%;
+            padding: 0.8rem;
+            font-size: 1rem;
+        }
+
+        .error-msg {
+            color: #ef4444;
+            font-size: 0.85rem;
+            text-align: center;
+            display: none;
+        }
+
+        .loading-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(11, 15, 25, 0.8);
+            backdrop-filter: blur(4px);
+            z-index: 100;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2rem;
+            font-weight: 500;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="loading-overlay" id="loadingOverlay">Loading...</div>
+
+    <!-- Auth screen -->
+    <div class="auth-container" id="authContainer">
+        <h2>Enter Gateway Key</h2>
+        <input type="password" id="gatewayKeyInput" placeholder="local-dev-key">
+        <div class="error-msg" id="authError">Invalid key. Please try again.</div>
+        <button class="primary" onclick="login()">Access Dashboard</button>
+    </div>
+
+    <!-- Dashboard Main -->
+    <div class="dashboard-container" id="dashboardContainer">
+        <header>
+            <h1>Railway AI Gateway v0.3.1</h1>
+            <div class="controls">
+                <select id="rangeSelect" onchange="loadData()">
+                    <option value="today">Today</option>
+                    <option value="all">All Time</option>
+                </select>
+                <button onclick="logout()">Logout</button>
+            </div>
+        </header>
+
+        <div class="summary-grid">
+            <div class="card">
+                <span class="card-title">Total Requests</span>
+                <span class="card-value" id="statRequests">0</span>
+                <span class="card-sub" id="statTokens">0 tokens used</span>
+            </div>
+
+            <div class="card">
+                <span class="card-title">Estimated Cost</span>
+                <span class="card-value" id="statCostUSD">$0.00</span>
+                <span class="card-sub" id="statCostTHB">฿0.00 THB</span>
+            </div>
+
+            <div class="card saving">
+                <span class="card-title">Saved Cost (Qwen Local)</span>
+                <span class="card-value" id="statSavedUSD" style="color: var(--success-color);">$0.00</span>
+                <span class="card-sub" id="statSavedTHB" style="color: var(--success-color);">฿0.00 THB</span>
+            </div>
+        </div>
+
+        <div class="recent-section">
+            <div class="section-header">
+                <h2>Recent Model Calls</h2>
+                <button onclick="loadData()">Refresh</button>
+            </div>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Provider</th>
+                            <th>Model</th>
+                            <th>Input Tokens</th>
+                            <th>Output Tokens</th>
+                            <th>Latency</th>
+                            <th>Cost</th>
+                            <th>Saved</th>
+                        </tr>
+                    </thead>
+                    <tbody id="recentTableBody">
+                        <tr>
+                            <td colspan="8" style="text-align: center; color: var(--text-muted);">No records found.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const authContainer = document.getElementById("authContainer");
+        const dashboardContainer = document.getElementById("dashboardContainer");
+        const gatewayKeyInput = document.getElementById("gatewayKeyInput");
+        const authError = document.getElementById("authError");
+        const loadingOverlay = document.getElementById("loadingOverlay");
+
+        // Check token on start
+        window.addEventListener("DOMContentLoaded", () => {
+            const savedKey = localStorage.getItem("gateway_api_key");
+            if (savedKey) {
+                showDashboard();
+            } else {
+                showAuth();
+            }
+        });
+
+        function showAuth() {
+            authContainer.style.display = "flex";
+            dashboardContainer.style.display = "none";
+        }
+
+        function showDashboard() {
+            authContainer.style.display = "none";
+            dashboardContainer.style.display = "flex";
+            loadData();
+        }
+
+        function login() {
+            const key = gatewayKeyInput.value.trim();
+            if (!key) return;
+            localStorage.setItem("gateway_api_key", key);
+            showDashboard();
+        }
+
+        function logout() {
+            localStorage.removeItem("gateway_api_key");
+            gatewayKeyInput.value = "";
+            showAuth();
+        }
+
+        async function loadData() {
+            const apiKey = localStorage.getItem("gateway_api_key");
+            if (!apiKey) return showAuth();
+
+            const range = document.getElementById("rangeSelect").value;
+            loadingOverlay.style.display = "flex";
+            authError.style.display = "none";
+
+            try {
+                // Fetch summary
+                const summaryRes = await fetch(`/admin/usage/summary?range=${range}`, {
+                    headers: { "Authorization": `Bearer ${apiKey}` }
+                });
+
+                if (summaryRes.status === 401) {
+                    loadingOverlay.style.display = "none";
+                    authError.style.display = "block";
+                    logout();
+                    return;
+                }
+
+                const summary = await summaryRes.json();
+                document.getElementById("statRequests").innerText = summary.total_requests.toLocaleString();
+                document.getElementById("statTokens").innerText = `${(summary.total_input_tokens + summary.total_output_tokens).toLocaleString()} tokens used`;
+                document.getElementById("statCostUSD").innerText = `$${summary.total_cost_usd.toFixed(4)}`;
+                document.getElementById("statCostTHB").innerText = `฿${summary.total_cost_thb.toFixed(2)} THB`;
+                document.getElementById("statSavedUSD").innerText = `$${summary.total_saved_usd.toFixed(4)}`;
+                document.getElementById("statSavedTHB").innerText = `฿${summary.total_saved_thb.toFixed(2)} THB`;
+
+                // Fetch recent calls
+                const recentRes = await fetch("/admin/usage/recent?limit=50", {
+                    headers: { "Authorization": `Bearer ${apiKey}` }
+                });
+                const recentCalls = await recentRes.json();
+
+                const tableBody = document.getElementById("recentTableBody");
+                if (recentCalls.length === 0) {
+                    tableBody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: var(--text-muted);">No records found.</td></tr>`;
+                } else {
+                    tableBody.innerHTML = recentCalls.map(call => {
+                        const date = new Date(call.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                        const providerClass = call.provider === 'deepseek' ? 'deepseek' : 'qwen';
+                        const providerText = call.provider === 'deepseek' ? 'DeepSeek' : 'Qwen Local';
+                        const cost = Number(call.cost_usd) > 0 ? `$${Number(call.cost_usd).toFixed(4)}` : '-';
+                        const saved = Number(call.saved_usd) > 0 ? `$${Number(call.saved_usd).toFixed(4)}` : '-';
+
+                        return `
+                            <tr>
+                                <td>${date}</td>
+                                <td><span class="badge ${providerClass}">${providerText}</span></td>
+                                <td>${call.model}</td>
+                                <td>${call.input_tokens.toLocaleString()}</td>
+                                <td>${call.output_tokens.toLocaleString()}</td>
+                                <td>${call.latency_ms.toLocaleString()} ms</td>
+                                <td>${cost}</td>
+                                <td style="color: ${Number(call.saved_usd) > 0 ? 'var(--success-color)' : 'inherit'}">${saved}</td>
+                            </tr>
+                        `;
+                    }).join("");
+                }
+
+            } catch (err) {
+                console.error("Failed to load dashboard data:", err);
+            } finally {
+                loadingOverlay.style.display = "none";
+            }
+        }
+    </script>
+</body>
+</html>

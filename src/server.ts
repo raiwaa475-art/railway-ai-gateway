@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import path from "path";
 import { config } from "./config/env.js";
 import { gatewayRouter } from "./routes/gateway.js";
 
@@ -26,6 +27,7 @@ import { initDb } from "./utils/db.js";
 const port = config.port;
 
 // Use Gateway Router
+app.use("/dashboard", express.static(path.join(process.cwd(), "public")));
 app.use("/", gatewayRouter);
 app.use("/v1", gatewayRouter);
 
