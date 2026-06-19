@@ -45,6 +45,7 @@ export class OrchestratorService {
             }
 
             const deepseekData = await deepseekRes.json();
+            console.log("[Orchestrator] DeepSeek raw response data:", JSON.stringify(deepseekData));
             const planText = deepseekData.content?.[0]?.text || "";
             console.log("[Orchestrator] Plan generated successfully. Length:", planText.length);
 
