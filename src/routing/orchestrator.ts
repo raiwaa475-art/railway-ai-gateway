@@ -118,11 +118,21 @@ export class OrchestratorService {
                 res.setHeader("connection", "keep-alive");
 
                 const reader = qwenRes.body.getReader();
+                console.log("[Orchestrator] Starting chunk piping loop...");
+                let chunkCount = 0;
                 while (true) {
                     const { done, value } = await reader.read();
-                    if (done) break;
+                    if (done) {
+                        console.log("[Orchestrator] Pipeloop done: true reached.");
+                        break;
+                    }
+                    chunkCount++;
+                    if (chunkCount % 20 === 0) {
+                        console.log(`[Orchestrator] Pipeloop forwarded ${chunkCount} chunks so far.`);
+                    }
                     res.write(Buffer.from(value));
                 }
+                console.log("[Orchestrator] Pipeloop finished. Ending response (res.end)...");
                 res.end();
             } else {
                 const text = await qwenRes.text();
