@@ -300,6 +300,7 @@
                     <option value="today">Today</option>
                     <option value="all">All Time</option>
                 </select>
+                <button onclick="clearData()" style="background-color: rgba(239, 68, 68, 0.15); border-color: rgba(239, 68, 68, 0.3); color: #f87171;">Clear Logs</button>
                 <button onclick="logout()">Logout</button>
             </div>
         </header>
@@ -507,6 +508,34 @@
 
             } catch (err) {
                 console.error("Failed to load dashboard data:", err);
+            } finally {
+                loadingOverlay.style.display = "none";
+            }
+        }
+
+        async function clearData() {
+            if (!confirm("Are you sure you want to clear all usage logs and statistics?")) {
+                return;
+            }
+            const apiKey = localStorage.getItem("gateway_api_key");
+            if (!apiKey) return showAuth();
+
+            loadingOverlay.style.display = "flex";
+            try {
+                const res = await fetch("/admin/usage/clear", {
+                    method: "POST",
+                    headers: { "Authorization": `Bearer ${apiKey}` }
+                });
+                const data = await res.json();
+                if (data.ok) {
+                    alert("All data cleared successfully.");
+                    loadData();
+                } else {
+                    alert("Failed to clear data: " + (data.error || "unknown error"));
+                }
+            } catch (err) {
+                console.error("Failed to clear data:", err);
+                alert("Failed to clear data due to request error.");
             } finally {
                 loadingOverlay.style.display = "none";
             }

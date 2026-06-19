@@ -442,3 +442,16 @@ gatewayRouter.get("/admin/usage/recent", authMiddleware, async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
+gatewayRouter.post("/admin/usage/clear", authMiddleware, async (req, res) => {
+    if (!pool) {
+        return res.json({ ok: false, error: "Database not connected" });
+    }
+    try {
+        await pool.query("DELETE FROM model_calls");
+        await pool.query("DELETE FROM gateway_requests");
+        res.json({ ok: true });
+    } catch (err: any) {
+        res.status(500).json({ ok: false, error: err.message });
+    }
+});
