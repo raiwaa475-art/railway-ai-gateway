@@ -1,186 +1,235 @@
 import { Request, Response as ExpressResponse } from "express";
+import crypto from "crypto";
 import { providerRegistry } from "./registry.js";
 import { DeepSeekProvider } from "../providers/deepseek.js";
 import { QwenLocalProvider } from "../providers/qwen-local.js";
+import { config } from "../config/env.js";
+
+function hasToolResults(messages: any[]): boolean {
+    return messages.some(msg => {
+        if (!Array.isArray(msg.content)) return false;
+        return msg.content.some((block: any) => block?.type === "tool_result");
+    });
+}
+
+function isCodeTask(text: string): boolean {
+    const keywords = [
+        "แก้", "เขียน", "เพิ่ม", "ลบ", "เปลี่ยน", "refactor",
+        "fix", "implement", "edit", "update", "patch", "code",
+        "bug", "error", "test", "build"
+    ];
+    return keywords.some(k => text.toLowerCase().includes(k.toLowerCase()));
+}
+
+function getLastUserText(messages: any[]): string {
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const msg = messages[i];
+        if (msg.role === "user") {
+            if (typeof msg.content === "string") {
+                return msg.content;
+            }
+            if (Array.isArray(msg.content)) {
+                return msg.content
+                    .filter((block: any) => block?.type === "text")
+                    .map((block: any) => block.text || "")
+                    .join("\n");
+            }
+        }
+    }
+    return "";
+}
+
+function extractReducedContext(messages: any[], maxChars = 8000): string {
+    const parts: string[] = [];
+
+    for (const msg of messages.slice(-8)) {
+        if (!Array.isArray(msg.content)) continue;
+
+        for (const block of msg.content) {
+            if (block?.type === "tool_result") {
+                const content = typeof block.content === "string"
+                    ? block.content
+                    : JSON.stringify(block.content);
+
+                parts.push(`TOOL_RESULT:\n${content.slice(0, 3000)}`);
+            }
+
+            if (block?.type === "text") {
+                parts.push(`TEXT:\n${String(block.text).slice(0, 1500)}`);
+            }
+        }
+    }
+
+    return parts.join("\n\n---\n\n").slice(-maxChars);
+}
 
 export class OrchestratorService {
-    static async handleTwinModels(req: Request, res: ExpressResponse): Promise<void> {
-        const clientHeaders: Record<string, string> = {
-            "user-agent": req.header("user-agent") || "railway-ai-gateway"
-        };
-
+    private static async forwardToDeepSeek(body: any, clientHeaders: Record<string, string>, res: ExpressResponse, isStream: boolean): Promise<void> {
         const deepseekProvider = providerRegistry.getProvider("deepseek") as DeepSeekProvider;
-        const qwenProvider = providerRegistry.getProvider("qwen-local") as QwenLocalProvider;
-
-        if (!deepseekProvider || !qwenProvider) {
+        if (!deepseekProvider) {
             res.status(500).json({
                 error: {
                     type: "gateway_error",
-                    message: "Required providers are not registered."
+                    message: "DeepSeek provider not registered."
                 }
             });
             return;
         }
 
-        // Prompt Engineering Pattern: Software Architect Planner
-        const plannerSystemPrompt = "คุณคือสถาปนิกซอฟต์แวร์ จงวิเคราะห์โค้ดและคำสั่งต่อไปนี้ จากนั้นให้สรุป 'แผนงานการแก้ไขทีละสเต็ป' เป็นข้อๆ อย่างกระชับ โดยไม่ต้องเขียนโค้ดเต็มไฟล์ออกมาเด็ดขาด ย้ำ! เน้นเฉพาะตรรกะและวิธีแก้" + 
-            (req.body.system ? `\n\n${req.body.system}` : "");
+        const deepseekRes = await deepseekProvider.handleRequest(body, clientHeaders);
+        res.status(deepseekRes.status);
+        const contentType = deepseekRes.headers.get("content-type");
+        if (contentType) {
+            res.setHeader("content-type", contentType);
+        }
 
-        console.log("[Orchestrator] Requesting planning blueprint from DeepSeek...");
+        if (isStream && deepseekRes.body) {
+            res.setHeader("cache-control", "no-cache");
+            res.setHeader("x-accel-buffering", "no");
+            res.setHeader("connection", "keep-alive");
 
-        try {
-            // Step 1 & 2: Plan via DeepSeek API (non-streaming, async)
-            const deepseekBody = {
-                ...req.body,
-                system: plannerSystemPrompt,
-                stream: false
-            };
-            // Omit tools from planning phase so DeepSeek generates a text plan instead of invoking tools
-            if (deepseekBody.tools) delete deepseekBody.tools;
-            if (deepseekBody.tool_choice) delete deepseekBody.tool_choice;
-
-            const deepseekRes = await deepseekProvider.handleRequest(deepseekBody, clientHeaders);
-            if (!deepseekRes.ok) {
-                const errText = await deepseekRes.text();
-                console.error("[Orchestrator] DeepSeek planning failed:", errText);
-                res.status(deepseekRes.status).send(errText);
-                return;
+            const reader = deepseekRes.body.getReader();
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                res.write(Buffer.from(value));
             }
-
-            const deepseekData = await deepseekRes.json();
-            console.log("[Orchestrator] DeepSeek plan response received. Status: ok.");
-            const textBlock = Array.isArray(deepseekData.content)
-                ? deepseekData.content.find((block: any) => block?.type === "text")
-                : null;
-            const planText = textBlock?.text || "";
-            console.log("[Orchestrator] Plan generated successfully. Length:", planText.length);
-
-            // Step 3: Reconstruct Payload
-            let codingInstruction = "";
-            const messages = req.body.messages || [];
-            for (let i = messages.length - 1; i >= 0; i--) {
-                if (messages[i].role === "user") {
-                    const content = messages[i].content;
-                    if (typeof content === "string") {
-                        codingInstruction = content;
-                    } else if (Array.isArray(content)) {
-                        codingInstruction = content
-                            .map((block: any) => (block?.type === "text" ? block.text : ""))
-                            .join("");
-                    }
-                    break;
-                }
-            }
-
-            const workerSystemPrompt = "คุณคือวิศวกรคอมพิวเตอร์หน้าที่เขียนโค้ด จงนำ 'แผนงานจากสถาปนิก' ที่แนบมานี้ ไปลงมือเขียนโค้ดจริงให้สมบูรณ์แบบที่สุด พร้อมสตรีมผลลัพธ์กลับไป";
-            const qwenUserMessageContent = `แผนงานจากสถาปนิก:\n${planText}\n\nคำสั่งสั่งเขียนโค้ด:\n${codingInstruction}`;
-
-            const qwenBody = {
-                ...req.body,
-                system: workerSystemPrompt,
-                messages: [
-                    {
-                        role: "user",
-                        content: qwenUserMessageContent
-                    }
-                ],
-                stream: req.body.stream ?? true
-            };
-
-            // Step 4: Execute Qwen Local
-            console.log("[Orchestrator] Executing coding task on Qwen Local...");
-            let qwenRes: Response;
-            try {
-                qwenRes = await qwenProvider.handleRequest(qwenBody, clientHeaders);
-            } catch (qwenError) {
-                console.warn("[Orchestrator] Qwen Local is offline or connection failed. Triggering Failover. Error:", qwenError);
-                await this.handleFailover(req, res, clientHeaders);
-                return;
-            }
-
-            if (!qwenRes.ok || qwenRes.status >= 500) {
-                console.warn(`[Orchestrator] Qwen Local failed with status ${qwenRes.status}. Triggering Failover.`);
-                await this.handleFailover(req, res, clientHeaders);
-                return;
-            }
-
-            // Stream response or return text
-            res.status(qwenRes.status);
-            const contentType = qwenRes.headers.get("content-type");
-            if (contentType) {
-                res.setHeader("content-type", contentType);
-            }
-
-            const isStream = !!req.body.stream;
-            if (isStream && qwenRes.body) {
-                res.setHeader("cache-control", "no-cache");
-                res.setHeader("x-accel-buffering", "no");
-                res.setHeader("connection", "keep-alive");
-
-                const reader = qwenRes.body.getReader();
-                console.log("[Orchestrator] Starting chunk piping loop...");
-                let chunkCount = 0;
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) {
-                        console.log("[Orchestrator] Pipeloop done: true reached.");
-                        break;
-                    }
-                    chunkCount++;
-                    if (chunkCount % 20 === 0) {
-                        console.log(`[Orchestrator] Pipeloop forwarded ${chunkCount} chunks so far.`);
-                    }
-                    res.write(Buffer.from(value));
-                }
-                console.log("[Orchestrator] Pipeloop finished. Ending response (res.end)...");
-                res.end();
-            } else {
-                const text = await qwenRes.text();
-                res.send(text);
-            }
-
-        } catch (error) {
-            console.error("[Orchestrator] General error:", error);
-            await this.handleFailover(req, res, clientHeaders);
+            res.end();
+        } else {
+            const text = await deepseekRes.text();
+            res.send(text);
         }
     }
 
-    private static async handleFailover(req: Request, res: ExpressResponse, clientHeaders: Record<string, string>): Promise<void> {
-        console.log("[Orchestrator] Smart Failover: Routing the original request to DeepSeek...");
-        try {
-            const deepseekProvider = providerRegistry.getProvider("deepseek") as DeepSeekProvider;
-            const deepseekRes = await deepseekProvider.handleRequest(req.body, clientHeaders);
+    static async handleTwinModels(req: Request, res: ExpressResponse): Promise<void> {
+        const requestId = crypto.randomUUID();
+        const clientHeaders: Record<string, string> = {
+            "user-agent": req.header("user-agent") || "railway-ai-gateway"
+        };
 
-            res.status(deepseekRes.status);
-            const contentType = deepseekRes.headers.get("content-type");
-            if (contentType) {
-                res.setHeader("content-type", contentType);
-            }
+        const messages = req.body.messages || [];
+        const hasResults = hasToolResults(messages);
+        const lastUserText = getLastUserText(messages);
+        const isCode = isCodeTask(lastUserText);
 
-            const isStream = !!req.body.stream;
-            if (isStream && deepseekRes.body) {
-                res.setHeader("cache-control", "no-cache");
-                res.setHeader("connection", "keep-alive");
+        const isStream = !!req.body.stream;
 
-                const reader = deepseekRes.body.getReader();
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    res.write(Buffer.from(value));
-                }
-                res.end();
-            } else {
-                const text = await deepseekRes.text();
-                res.send(text);
-            }
-        } catch (failoverError) {
-            console.error("[Orchestrator] Smart Failover also failed:", failoverError);
-            res.status(500).json({
-                error: {
-                    type: "gateway_error",
-                    message: "Both Qwen Local and DeepSeek Failover failed"
-                }
-            });
+        // If not eligible (no tool results yet or not a code task), pass-through to DeepSeek directly
+        if (!hasResults || !isCode) {
+            console.log(JSON.stringify({
+                time: new Date().toISOString(),
+                requestId,
+                mode: "hybrid-flow",
+                hasToolResults: hasResults,
+                codeTask: isCode,
+                qwenDraftUsed: false,
+                finalProvider: "deepseek"
+            }));
+            await this.forwardToDeepSeek(req.body, clientHeaders, res, isStream);
+            return;
         }
+
+        // Qwen internal coder flow
+        const qwenProvider = providerRegistry.getProvider("qwen-local") as QwenLocalProvider;
+        if (!qwenProvider) {
+            console.log(JSON.stringify({
+                time: new Date().toISOString(),
+                requestId,
+                mode: "hybrid-flow",
+                hasToolResults: hasResults,
+                codeTask: isCode,
+                qwenDraftUsed: false,
+                qwenErrorType: "not_registered",
+                finalProvider: "deepseek"
+            }));
+            await this.forwardToDeepSeek(req.body, clientHeaders, res, isStream);
+            return;
+        }
+
+        const reducedContext = extractReducedContext(messages);
+        const reducedContextChars = reducedContext.length;
+
+        const qwenBody = {
+            system: `You are an internal code draft generator.
+You do not control tools.
+You do not ask to read files.
+Use only the provided context.
+Return a concise patch suggestion or implementation notes.
+Prefer unified diff if enough file context exists.
+Do not explain broadly.`,
+            messages: [
+                {
+                    role: "user",
+                    content: `Context:\n${reducedContext}\n\nTask: Draft a coding solution/patch.`
+                }
+            ],
+            stream: false,
+            max_tokens: 3072,
+            temperature: 0.2
+        };
+
+        let qwenDraftUsed = false;
+        let qwenErrorType: string | undefined = undefined;
+        let qwenLatencyMs = 0;
+        let draftText = "";
+
+        const qwenStartTime = Date.now();
+        try {
+            const qwenRes = await qwenProvider.handleRequest(qwenBody, clientHeaders);
+            qwenLatencyMs = Date.now() - qwenStartTime;
+
+            if (qwenRes.ok) {
+                const qwenData = await qwenRes.json();
+                if (Array.isArray(qwenData.content)) {
+                    const textBlock = qwenData.content.find((b: any) => b?.type === "text");
+                    draftText = textBlock?.text || "";
+                }
+                if (draftText) {
+                    qwenDraftUsed = true;
+                } else {
+                    qwenErrorType = "empty_draft";
+                }
+            } else {
+                qwenErrorType = `http_status_${qwenRes.status}`;
+            }
+        } catch (error: any) {
+            qwenLatencyMs = Date.now() - qwenStartTime;
+            qwenErrorType = error.name === "AbortError" ? "timeout" : "connection_error";
+        }
+
+        let finalBody = req.body;
+        if (qwenDraftUsed && draftText) {
+            const augmentedMessages = [
+                ...req.body.messages,
+                {
+                    role: "user",
+                    content: [
+                        {
+                            type: "text",
+                            text: `Internal Qwen coder draft below. Use it only as a suggestion. Review it carefully. If correct, apply changes using Claude Code tools. If wrong, ignore it.\n\n<QWEN_DRAFT>\n${draftText}\n</QWEN_DRAFT>`
+                        }
+                    ]
+                }
+            ];
+            finalBody = {
+                ...req.body,
+                messages: augmentedMessages
+            };
+        }
+
+        console.log(JSON.stringify({
+            time: new Date().toISOString(),
+            requestId,
+            mode: "hybrid-flow",
+            hasToolResults: hasResults,
+            codeTask: isCode,
+            qwenDraftUsed,
+            qwenErrorType,
+            reducedContextChars,
+            qwenLatencyMs,
+            finalProvider: "deepseek"
+        }));
+
+        await this.forwardToDeepSeek(finalBody, clientHeaders, res, isStream);
     }
 }
