@@ -48,7 +48,7 @@ export class QwenLocalProvider implements Provider {
         };
 
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 seconds timeout
+        const timeoutId = setTimeout(() => controller.abort(), 90000); // 90 seconds timeout
 
         try {
             const url = `${config.qwenLocalApiUrl}/chat/completions`;
