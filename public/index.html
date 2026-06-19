@@ -44,11 +44,11 @@
 
         header {
             width: 100%;
-            max-width: 1200px;
+            max-width: none;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 2rem;
+            margin-bottom: 1.5rem;
             padding-bottom: 1rem;
             border-bottom: 1px solid var(--card-border);
         }
@@ -97,21 +97,21 @@
 
         .dashboard-container {
             width: 100%;
-            max-width: 1200px;
+            max-width: 1560px;
             display: none; /* Shown dynamically */
             flex-direction: column;
-            gap: 2rem;
+            gap: 1.5rem;
         }
 
         .summary-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-            gap: 1.5rem;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 1rem;
         }
 
         .qwen-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+            grid-template-columns: repeat(5, minmax(0, 1fr));
             gap: 1rem;
         }
 
@@ -119,8 +119,8 @@
             background: var(--card-bg);
             backdrop-filter: blur(12px);
             border: 1px solid var(--card-border);
-            border-radius: 16px;
-            padding: 1.5rem;
+            border-radius: 8px;
+            padding: 1.25rem;
             display: flex;
             flex-direction: column;
             position: relative;
@@ -148,60 +148,92 @@
         }
 
         .card-title {
-            font-size: 0.9rem;
+            font-size: 0.78rem;
             text-transform: uppercase;
             letter-spacing: 0.05em;
             color: var(--text-muted);
-            margin-bottom: 0.8rem;
+            margin-bottom: 0.7rem;
         }
 
         .card-value {
-            font-size: 1.8rem;
+            font-size: 1.65rem;
             font-weight: 700;
             margin-bottom: 0.4rem;
+            overflow-wrap: anywhere;
         }
 
         .card-sub {
             font-size: 0.8rem;
             color: var(--text-muted);
+            line-height: 1.35;
+        }
+
+        .metric-reason {
+            font-size: 1rem;
+            line-height: 1.25;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
 
         .recent-section {
             background: var(--card-bg);
             backdrop-filter: blur(12px);
             border: 1px solid var(--card-border);
-            border-radius: 16px;
-            padding: 1.5rem;
+            border-radius: 8px;
+            padding: 1.25rem;
         }
 
         .section-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 1.5rem;
+            gap: 1rem;
+            margin-bottom: 1rem;
         }
 
         .table-wrapper {
             width: 100%;
             overflow-x: auto;
+            border-radius: 8px;
         }
 
         table {
             width: 100%;
+            min-width: 1480px;
             border-collapse: collapse;
             text-align: left;
-            font-size: 0.9rem;
+            table-layout: fixed;
+            font-size: 0.82rem;
         }
 
         th, td {
-            padding: 1rem;
+            padding: 0.75rem 0.65rem;
             border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            vertical-align: top;
         }
 
         th {
             color: var(--text-muted);
             font-weight: 500;
+            line-height: 1.2;
         }
+
+        th:nth-child(1), td:nth-child(1) { width: 82px; }
+        th:nth-child(2), td:nth-child(2) { width: 112px; }
+        th:nth-child(3), td:nth-child(3) { width: 150px; }
+        th:nth-child(4), td:nth-child(4),
+        th:nth-child(5), td:nth-child(5),
+        th:nth-child(6), td:nth-child(6) { width: 76px; }
+        th:nth-child(7), td:nth-child(7) { width: 150px; }
+        th:nth-child(8), td:nth-child(8) { width: 120px; }
+        th:nth-child(9), td:nth-child(9) { width: 190px; }
+        th:nth-child(10), td:nth-child(10) { width: 160px; }
+        th:nth-child(11), td:nth-child(11) { width: 78px; }
+        th:nth-child(12), td:nth-child(12) { width: 230px; }
+        th:nth-child(13), td:nth-child(13) { width: 96px; }
+        th:nth-child(14), td:nth-child(14),
+        th:nth-child(15), td:nth-child(15) { width: 82px; }
 
         tr:hover td {
             background-color: rgba(255, 255, 255, 0.02);
@@ -214,6 +246,10 @@
             font-size: 0.75rem;
             font-weight: 600;
             text-transform: uppercase;
+            max-width: 100%;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
 
         .badge.deepseek {
@@ -273,10 +309,56 @@
         }
 
         .fix-hint {
-            max-width: 220px;
             color: #d1d5db;
             font-size: 0.82rem;
             line-height: 1.35;
+        }
+
+        .truncate {
+            display: block;
+            max-width: 100%;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .model-cell {
+            font-weight: 600;
+            line-height: 1.25;
+            overflow-wrap: anywhere;
+        }
+
+        @media (max-width: 1250px) {
+            .summary-grid,
+            .qwen-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            header,
+            .section-header {
+                align-items: flex-start;
+                flex-direction: column;
+            }
+
+            .controls {
+                flex-wrap: wrap;
+            }
+        }
+
+        @media (max-width: 720px) {
+            body {
+                padding: 1rem 0.75rem;
+            }
+
+            .summary-grid,
+            .qwen-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .card,
+            .recent-section {
+                padding: 1rem;
+            }
         }
 
         .auth-container {
@@ -416,7 +498,7 @@
             </div>
             <div class="card">
                 <span class="card-title">Top Fallback Reason</span>
-                <span class="card-value" id="qwenTopFallback" style="font-size: 1.15rem; line-height: 1.25;">-</span>
+                <span class="card-value metric-reason" id="qwenTopFallback" title="-">-</span>
                 <span class="card-sub" id="qwenTopFallbackSub">No Qwen fallback rows</span>
             </div>
             <div class="card">
@@ -518,7 +600,8 @@
 
         function badge(text, color = "gray") {
             if (!text || text === "-") return `<span class="cell-muted">-</span>`;
-            return `<span class="badge ${color}">${escapeHtml(text)}</span>`;
+            const safeText = escapeHtml(text);
+            return `<span class="badge ${color}" title="${safeText}">${safeText}</span>`;
         }
 
         function getReasonBadge(reason) {
@@ -560,6 +643,7 @@
             if (reason === "file_mismatch") return "Normalize path or force FILE to exact targetFile";
             if (reason === "line_range_out_of_bounds") return "Retry with total line count and bounded START_LINE/END_LINE";
             if (reason === "tool_result_partial_context_advisory_only") return "Read exact file content before Qwen patch";
+            if (reason === "no_exact_context_advisory_only") return "Read exact file content before Qwen patch";
             if (reason === "reduced_context_advisory_only") return "Do not validate patch from reduced context";
             if (reason === "no_workspace_file_on_gateway") return "Enable exact tool_result context; avoid Railway disk dependency";
             if (reason === "approval_parse_failed") return "Force approval model to return JSON only";
@@ -596,7 +680,9 @@
             document.getElementById("qwenFailedCount").innerText = failed.toLocaleString();
             document.getElementById("qwenExactContextRate").innerText = total ? `${Math.round((exact / total) * 100)}%` : "-";
             document.getElementById("qwenExactContextSub").innerText = `${exact.toLocaleString()} exact / ${total.toLocaleString()} calls`;
-            document.getElementById("qwenTopFallback").innerText = topFallback ? topFallback[0] : "-";
+            const topFallbackText = topFallback ? topFallback[0] : "-";
+            document.getElementById("qwenTopFallback").innerText = topFallbackText;
+            document.getElementById("qwenTopFallback").title = topFallbackText;
             document.getElementById("qwenTopFallbackSub").innerText = topFallback ? `${topFallback[1].toLocaleString()} recent rows` : "No Qwen fallback rows";
             document.getElementById("deepseekFallbackTokens").innerText = deepseekFallbackTokens.toLocaleString();
         }
@@ -649,7 +735,7 @@
                     <tr>
                         <td>${date}</td>
                         <td><span class="badge ${providerClass}">${providerText}</span></td>
-                        <td>${escapeHtml(call.model)}</td>
+                        <td><span class="model-cell" title="${escapeHtml(call.model)}">${escapeHtml(call.model)}</span></td>
                         <td>${inputTokens.toLocaleString()}</td>
                         <td>${outputTokens.toLocaleString()}</td>
                         <td>${totalTokens.toLocaleString()}</td>
@@ -658,7 +744,7 @@
                         <td>${getReasonBadge(call.fallback_reason)}</td>
                         <td>${isQwenCall(call) ? getContextBadge(call) : `<span class="cell-muted">-</span>`}</td>
                         <td>${retry}</td>
-                        <td><div class="fix-hint">${escapeHtml(fixHint)}</div></td>
+                        <td><div class="fix-hint" title="${escapeHtml(fixHint)}">${escapeHtml(fixHint)}</div></td>
                         <td>${latency.toLocaleString()} ms</td>
                         <td>${cost}</td>
                         <td style="color: ${Number(call.saved_usd) > 0 ? 'var(--success-color)' : 'inherit'}">${saved}</td>

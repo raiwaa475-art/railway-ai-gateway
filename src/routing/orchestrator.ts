@@ -1512,10 +1512,17 @@ Rules:
 - Do not use unified diff.
 - Do not use FIND/REPLACE.`
             : `Exact File Content is not available.
-Write an advisory implementation draft only.
+Write concise implementation notes only.
 Do not claim this is directly applicable.
+Do not return a patch.
+Do not return line_range_replace.
+Do not return unified diff.
+Do not use --- +++ @@.
+Do not use FILE/START_LINE/END_LINE/REPLACE.
+Do not use FIND/REPLACE.
 Do not output Edit tool instructions.
-Return concise code-oriented guidance or a patch draft for DeepSeek/Claude Code to verify.`;
+Keep the response under 300 tokens.
+Tell DeepSeek/Claude Code which exact file content should be read before patching.`;
 
         let qwenDraftUsed = false;
         let qwenErrorType: string | undefined = undefined;
@@ -1556,7 +1563,7 @@ Latest user intent preview: ${decision.userIntentPreview}`
                         }
                     ],
                     stream: false,
-                    max_tokens: qwenMaxTokens,
+                    max_tokens: hasExactOriginalFileContent ? qwenMaxTokens : Math.min(qwenMaxTokens, 300),
                     temperature: 0.15
                 };
                 const qwenRes = await qwenProvider.handleRequest(qwenBody, clientHeaders);
@@ -1586,9 +1593,11 @@ Latest user intent preview: ${decision.userIntentPreview}`
                 qwenInputTokens = qwenResult.inputTokens;
                 qwenOutputTokens = qwenResult.outputTokens;
 
-                let patchCheck = hasExactOriginalFileContent && qwenDraftMode === "unified_diff"
-                    ? { ok: false, mode: "unified_diff" as const, reason: "unified_diff" }
-                    : validateQwenPatch(parseQwenFindReplacePatch(draftText, rawFileContent), messages, userIntent, rawFileContent, hasExactOriginalFileContent, fileContextSource);
+                let patchCheck = hasExactOriginalFileContent
+                    ? (qwenDraftMode === "unified_diff"
+                        ? { ok: false, mode: "unified_diff" as const, reason: "unified_diff" }
+                        : validateQwenPatch(parseQwenFindReplacePatch(draftText, rawFileContent), messages, userIntent, rawFileContent, hasExactOriginalFileContent, fileContextSource))
+                    : { ok: false, mode: "invalid" as const, reason: "no_exact_context_advisory_only" };
 
                 const failedReasons = [
                     "patch_parse_unsupported",
@@ -1607,9 +1616,11 @@ Latest user intent preview: ${decision.userIntentPreview}`
                     "file_mismatch"
                 ];
 
-                const needsRetry = shouldRetryQwenDraft(qwenDraftMode, qwenDraftChars) || 
+                const needsRetry = hasExactOriginalFileContent && (
+                    shouldRetryQwenDraft(qwenDraftMode, qwenDraftChars) ||
                     qwenDraftMode === "unified_diff" ||
-                    (!patchCheck.ok && failedReasons.includes(patchCheck.reason || ""));
+                    (!patchCheck.ok && failedReasons.includes(patchCheck.reason || ""))
+                );
 
                 if (needsRetry) {
                     qwenRetryUsed = true;
@@ -1764,9 +1775,11 @@ Rules:
         }
 
         if (draftText) {
-            parsedPatch = hasExactOriginalFileContent && qwenDraftMode === "unified_diff"
-                ? { ok: false, mode: "invalid", reason: "unified_diff" }
-                : validateQwenPatch(parseQwenFindReplacePatch(draftText, rawFileContent), messages, userIntent, rawFileContent, hasExactOriginalFileContent, fileContextSource);
+            parsedPatch = hasExactOriginalFileContent
+                ? (qwenDraftMode === "unified_diff"
+                    ? { ok: false, mode: "invalid", reason: "unified_diff" }
+                    : validateQwenPatch(parseQwenFindReplacePatch(draftText, rawFileContent), messages, userIntent, rawFileContent, hasExactOriginalFileContent, fileContextSource))
+                : { ok: false, mode: "invalid", reason: "no_exact_context_advisory_only" };
             qwenPatchValid = parsedPatch.ok;
             qwenPatchReason = parsedPatch.reason || (parsedPatch.ok ? "valid" : "invalid_patch");
         } else {
@@ -1804,6 +1817,8 @@ Rules:
             } else {
                 fallbackReason = "deepseek_provider_not_registered";
             }
+        } else if (draftText && !hasExactOriginalFileContent) {
+            fallbackReason = "no_exact_context_advisory_only";
         } else if (draftText) {
             fallbackReason = qwenPatchReason;
         } else {
@@ -1888,7 +1903,7 @@ Rules:
         let finalBody = req.body;
         if (draftText) {
             const validButNotApproved = qwenPatchValid && !deepseekApprovalApproved;
-            const forwardedDraftText = validButNotApproved ? draftText : draftText.slice(0, 800);
+            const forwardedDraftText = validButNotApproved && hasExactOriginalFileContent ? draftText : draftText.slice(0, 800);
             const advisoryIntro = qwenPatchValid
                 ? `Internal Qwen primary patch draft below.
 
@@ -1903,6 +1918,9 @@ Fallback reason: ${fallbackReason || qwenPatchReason || "invalid_patch"}.
 Patch mode: ${qwenDraftMode}.
 Only the first 800 chars of the rejected draft are included.
 Treat this only as advisory context. Verify against the actual file context before using it.`;
+            const exactContextInstruction = hasExactOriginalFileContent
+                ? "If applying a valid Qwen patch, use tools directly."
+                : "Exact file context is missing. Read exact file content before creating or applying any patch.";
             const augmentedMessages = [
                 ...req.body.messages,
                 {
@@ -1915,7 +1933,7 @@ Treat this only as advisory context. Verify against the actual file context befo
 Keep response short.
 Prefer tool_use/Edit only if verified.
 max final explanation 3 bullets.
-If applying a valid Qwen patch, use tools directly.
+${exactContextInstruction}
 Do not generate another full implementation unless Qwen draft is wrong.
 
 <QWEN_DRAFT mode="${qwenDraftMode}" chars="${qwenDraftChars}">
