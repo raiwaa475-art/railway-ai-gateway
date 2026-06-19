@@ -216,17 +216,32 @@ interface DeterministicRouterDecision {
     usefulCodeContext: boolean;
 }
 
-type QwenDraftMode = "find_replace" | "unified_diff" | "line_range_replace" | "replacement_snippet" | "snippet" | "notes" | "insufficient_context" | "empty";
+type QwenDraftMode = "code_draft" | "find_replace" | "unified_diff" | "line_range_replace" | "replacement_snippet" | "snippet" | "notes" | "insufficient_context" | "empty";
 
 interface ParsedQwenPatch {
     ok: boolean;
     filePath?: string;
     find?: string;
     replace?: string;
-    mode: "find_replace" | "unified_diff" | "line_range_replace" | "invalid";
+    mode: "code_draft" | "find_replace" | "unified_diff" | "line_range_replace" | "invalid";
     reason?: string;
     startLine?: number;
     endLine?: number;
+}
+
+interface QwenCodeDraft {
+    target_file: string;
+    target_symbol: string;
+    old_anchor: string;
+    change_summary: string;
+    new_code: string;
+}
+
+interface ValidatedQwenCodeDraft {
+    ok: boolean;
+    draft?: QwenCodeDraft;
+    reason: string;
+    anchorOccurrences?: number;
 }
 
 function normalizeNewlines(str: string): string {
@@ -284,6 +299,10 @@ function trimOuterBlankLines(str: string): string {
 function detectQwenDraftMode(text: string): QwenDraftMode {
     const t = String(text || "").trim();
     if (!t) return "empty";
+    try {
+        const parsed = extractJsonObject(t);
+        if (parsed && typeof parsed === "object" && "new_code" in parsed) return "code_draft";
+    } catch {}
     if (t.startsWith("INSUFFICIENT_CONTEXT")) return "insufficient_context";
     if (t.includes("FILE:") && t.includes("START_LINE:") && t.includes("END_LINE:") && t.includes("REPLACE:")) return "line_range_replace";
     if (t.includes("---") && t.includes("+++") && t.includes("@@")) return "unified_diff";
@@ -308,8 +327,96 @@ function containsUnifiedDiffMarkers(text: string): boolean {
     return (t.includes("---") && t.includes("+++")) || t.includes("@@");
 }
 
+function containsMarkdownFence(text: string): boolean {
+    return String(text || "").includes("```");
+}
+
+function containsToolUseMarkers(text: string): boolean {
+    const t = String(text || "").toLowerCase();
+    return t.includes("tool_use") || t.includes("<tool_use") || t.includes("\"name\":\"edit\"") || t.includes("\"name\": \"edit\"");
+}
+
+function parseQwenCodeDraft(text: string): QwenCodeDraft | undefined {
+    const parsed = extractJsonObject(text);
+    const draft = {
+        target_file: String(parsed?.target_file || ""),
+        target_symbol: String(parsed?.target_symbol || ""),
+        old_anchor: String(parsed?.old_anchor || ""),
+        change_summary: String(parsed?.change_summary || ""),
+        new_code: String(parsed?.new_code || "")
+    };
+    return draft;
+}
+
+function validateQwenCodeDraft(
+    text: string,
+    targetFile: string,
+    rawFileContent: string,
+    focusedContext: string
+): ValidatedQwenCodeDraft {
+    let draft: QwenCodeDraft | undefined;
+    try {
+        draft = parseQwenCodeDraft(text);
+    } catch {
+        return { ok: false, reason: "qwen_json_parse_failed" };
+    }
+
+    if (!draft) {
+        return { ok: false, reason: "qwen_json_parse_failed" };
+    }
+
+    if (normalizePatchPath(draft.target_file) !== normalizePatchPath(targetFile)) {
+        return { ok: false, draft, reason: "qwen_file_mismatch" };
+    }
+
+    if (!draft.new_code.trim()) {
+        return { ok: false, draft, reason: "qwen_empty_new_code" };
+    }
+
+    const combinedOutput = `${draft.new_code}\n${draft.old_anchor}`;
+    if (containsMarkdownFence(combinedOutput)) {
+        return { ok: false, draft, reason: "qwen_markdown_violation" };
+    }
+    if (containsUnifiedDiffMarkers(combinedOutput) || /\n(?:FIND|REPLACE|START_LINE|END_LINE):/i.test(combinedOutput)) {
+        return { ok: false, draft, reason: "qwen_format_violation_diff" };
+    }
+    if (containsToolUseMarkers(combinedOutput)) {
+        return { ok: false, draft, reason: "qwen_tool_use_violation" };
+    }
+
+    const anchor = draft.old_anchor.trim();
+    if (!anchor) {
+        return { ok: false, draft, reason: "qwen_anchor_not_found" };
+    }
+
+    const normalizedRaw = normalizeNewlines(rawFileContent);
+    const normalizedFocused = normalizeNewlines(focusedContext);
+    const normalizedAnchor = normalizeNewlines(anchor);
+    const rawOccurrences = countOccurrences(normalizedRaw, normalizedAnchor);
+    const focusedOccurrences = countOccurrences(normalizedFocused, normalizedAnchor);
+
+    if (rawOccurrences === 0 && focusedOccurrences === 0) {
+        return { ok: false, draft, reason: "qwen_anchor_not_found", anchorOccurrences: 0 };
+    }
+    if (rawOccurrences > 1) {
+        return { ok: false, draft, reason: "qwen_anchor_ambiguous", anchorOccurrences: rawOccurrences };
+    }
+
+    return {
+        ok: true,
+        draft: {
+            ...draft,
+            old_anchor: anchor,
+            new_code: trimOuterBlankLines(normalizeNewlines(draft.new_code))
+        },
+        reason: "qwen_code_draft_valid",
+        anchorOccurrences: rawOccurrences || focusedOccurrences
+    };
+}
+
 function isUsableQwenDraft(mode: QwenDraftMode, chars: number): boolean {
-    return mode === "unified_diff" ||
+    return mode === "code_draft" ||
+        mode === "unified_diff" ||
         mode === "find_replace" ||
         mode === "line_range_replace" ||
         mode === "replacement_snippet" ||
@@ -877,6 +984,61 @@ function extractReducedContext(messages: any[], userIntent = "", maxChars = 8000
     ].join("\n\n");
 
     return context.slice(-maxChars);
+}
+
+function extractFocusedCodeContext(rawFileContent: string, userIntent = "", maxLines = 260): { context: string; lines: number; chars: number; targetSymbol: string } {
+    const normalized = normalizeNewlines(rawFileContent);
+    const lines = normalized.split("\n");
+    if (lines.length === 0) {
+        return { context: "", lines: 0, chars: 0, targetSymbol: "unknown" };
+    }
+
+    const symbolMatches = Array.from(userIntent.matchAll(/(?:function|component|class|const|let|var|selector|block)\s+([A-Za-z_$][\w$-]*)/gi));
+    const quotedMatches = Array.from(userIntent.matchAll(/[`"']([A-Za-z_$][\w$-]{2,})[`"']/g));
+    const candidateSymbols = [...symbolMatches.map(match => match[1]), ...quotedMatches.map(match => match[1])];
+
+    let centerIndex = -1;
+    let targetSymbol = candidateSymbols[0] || "unknown";
+    for (const symbol of candidateSymbols) {
+        const found = lines.findIndex(line => line.includes(symbol));
+        if (found >= 0) {
+            centerIndex = found;
+            targetSymbol = symbol;
+            break;
+        }
+    }
+
+    if (centerIndex === -1) {
+        const intentWords = userIntent
+            .split(/[^A-Za-z0-9_$-]+/)
+            .filter(word => word.length >= 4 && !["implement", "change", "update", "refactor", "function", "component"].includes(word.toLowerCase()))
+            .slice(0, 12);
+        for (const word of intentWords) {
+            const found = lines.findIndex(line => line.toLowerCase().includes(word.toLowerCase()));
+            if (found >= 0) {
+                centerIndex = found;
+                targetSymbol = word;
+                break;
+            }
+        }
+    }
+
+    if (centerIndex === -1) {
+        centerIndex = Math.min(Math.floor(lines.length / 2), Math.max(0, maxLines / 2));
+    }
+
+    const halfWindow = Math.floor(maxLines / 2);
+    const start = Math.max(0, centerIndex - halfWindow);
+    const end = Math.min(lines.length, start + maxLines);
+    const adjustedStart = Math.max(0, end - maxLines);
+    const context = lines.slice(adjustedStart, end).join("\n");
+
+    return {
+        context,
+        lines: end - adjustedStart,
+        chars: context.length,
+        targetSymbol
+    };
 }
 
 function extractJsonFromString(str: string): any {
@@ -1477,55 +1639,24 @@ Expected JSON shape:
         }
 
         const hasExactOriginalFileContent = rawFileContent.length > 0 && (fileContextSource === "tool_result_exact" || fileContextSource === "disk_exact");
-        const directEditEligible = hasExactOriginalFileContent;
-        const qwenDelegationMode = directEditEligible ? "patch_draft" : "advisory_draft";
-        const totalLineCount = hasExactOriginalFileContent ? rawFileContent.split("\n").length : 0;
+        const directEditEligible = false;
+        const qwenDelegationMode = "code_writer_draft";
+        const focused = hasExactOriginalFileContent
+            ? extractFocusedCodeContext(rawFileContent, userIntent)
+            : { context: "", lines: 0, chars: 0, targetSymbol: "unknown" };
 
-        let originalContentBlock = "";
-        if (hasExactOriginalFileContent) {
-            const lines = rawFileContent.split("\n");
-            const numberedLines = lines.map((line, idx) => `${idx + 1}| ${line}`).join("\n");
-            originalContentBlock = `ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS:
-\`\`\`
-${numberedLines}
-\`\`\``;
-        } else {
-            originalContentBlock = `ORIGINAL_FILE_CONTENT of ${targetFile || "unknown"}:
-\`\`\`
-${rawFileContent}
-\`\`\``;
-        }
-
-        const qwenSystemPrompt = hasExactOriginalFileContent
-            ? `You are given Exact File Content from the user's coding tool context.
-Use it as the only source of truth.
-
-Return ONLY this exact format:
-
-FILE: ${targetFile}
-START_LINE: <number>
-END_LINE: <number>
-REPLACE:
-<replacement code>
-
-No markdown.
-No explanation.
-No unified diff.
-No --- +++ @@.
-No FIND/REPLACE.
-FILE must exactly equal target file.`
-            : `Exact File Content is not available.
-Write concise implementation notes only.
-Do not claim this is directly applicable.
-Do not return a patch.
-Do not return line_range_replace.
-Do not return unified diff.
-Do not use --- +++ @@.
-Do not use FILE/START_LINE/END_LINE/REPLACE.
-Do not use FIND/REPLACE.
-Do not output Edit tool instructions.
-Keep the response under 300 tokens.
-Tell DeepSeek/Claude Code which exact file content should be read before patching.`;
+        const qwenSystemPrompt = `You are a code writer only.
+Write the smallest code block that satisfies the requested change.
+Use existing project style.
+Prefer existing functions, native APIs, standard library, and installed dependencies.
+Do not add abstractions unless required.
+Do not choose line numbers.
+Do not output patches.
+Do not output unified diff.
+Do not output FIND/REPLACE.
+Do not output markdown.
+Do not output explanations.
+Return JSON only with target_file, target_symbol, old_anchor, change_summary, new_code.`;
 
         let qwenDraftUsed = false;
         let qwenErrorType: string | undefined = undefined;
@@ -1541,11 +1672,18 @@ Tell DeepSeek/Claude Code which exact file content should be read before patchin
         let deepseekApprovalApproved = false;
         let emittedToolUse: string | undefined;
         let fallbackReason: string | undefined;
-        let parsedPatch: ParsedQwenPatch = { ok: false, mode: "invalid", reason: "not_parsed" };
+        let parsedPatch: ParsedQwenPatch = { ok: false, mode: "code_draft", reason: "not_parsed" };
+        let validatedDraft: ValidatedQwenCodeDraft = { ok: false, reason: hasExactOriginalFileContent ? "not_parsed" : "skipped_no_exact_context" };
         let qwenInputTokens = 0;
         let qwenOutputTokens = 0;
 
         const qwenStartTime = Date.now();
+        if (!hasExactOriginalFileContent) {
+            fallbackReason = "skipped_no_exact_context";
+            qwenPatchReason = fallbackReason;
+            qwenDraftMode = "empty";
+            qwenDraftWeak = true;
+        } else {
         try {
             const callQwen = async (retryInstruction?: string) => {
                 const qwenBody = {
@@ -1555,18 +1693,19 @@ Tell DeepSeek/Claude Code which exact file content should be read before patchin
                             role: "user",
                             content: `TARGET_FILE: ${targetFile}
 
-${originalContentBlock}
+FOCUSED_CODE_CONTEXT:
+${focused.context}
 
-Reduced context:
-${reducedContext}
+Task: Write a replacement/new code block for this requested change.
 
-Task: Generate the primary implementation patch for this code edit request.
+Latest user intent preview: ${decision.userIntentPreview}
 
-Latest user intent preview: ${decision.userIntentPreview}`
+Return exactly:
+{"target_file":"${targetFile}","target_symbol":"${focused.targetSymbol}","old_anchor":"one exact short line copied from FOCUSED_CODE_CONTEXT","change_summary":"short summary","new_code":"replacement code only"}`
                         }
                     ],
                     stream: false,
-                    max_tokens: hasExactOriginalFileContent ? qwenMaxTokens : Math.min(qwenMaxTokens, 300),
+                    max_tokens: Math.min(qwenMaxTokens, 1000),
                     temperature: 0.15
                 };
                 const qwenRes = await qwenProvider.handleRequest(qwenBody, clientHeaders);
@@ -1596,169 +1735,15 @@ Latest user intent preview: ${decision.userIntentPreview}`
                 qwenInputTokens = qwenResult.inputTokens;
                 qwenOutputTokens = qwenResult.outputTokens;
 
-                const qwenUnifiedDiffViolation = hasExactOriginalFileContent && containsUnifiedDiffMarkers(draftText);
-                let patchCheck = hasExactOriginalFileContent
-                    ? (qwenUnifiedDiffViolation
-                        ? { ok: false, mode: "invalid" as const, reason: "qwen_format_violation_unified_diff" }
-                        : validateQwenPatch(parseQwenFindReplacePatch(draftText, rawFileContent), messages, userIntent, rawFileContent, hasExactOriginalFileContent, fileContextSource))
-                    : { ok: false, mode: "invalid" as const, reason: "no_exact_context_advisory_only" };
+                validatedDraft = validateQwenCodeDraft(draftText, targetFile, rawFileContent, focused.context);
 
-                const failedReasons = [
-                    "patch_parse_unsupported",
-                    "patch_parse_failed",
-                    "find_block_too_short",
-                    "replace_too_large",
-                    "missing_file_find_or_replace",
-                    "empty_patch",
-                    "not_parsed",
-                    "find_block_not_found_in_context",
-                    "find_block_matches_multiple",
-                    "line_range_find_not_found",
-                    "line_range_find_matches_multiple",
-                    "line_range_invalid_numbers",
-                    "line_range_out_of_bounds",
-                    "file_mismatch"
-                ];
-
-                const needsRetry = hasExactOriginalFileContent && (
-                    shouldRetryQwenDraft(qwenDraftMode, qwenDraftChars) ||
-                    qwenUnifiedDiffViolation ||
-                    (!patchCheck.ok && failedReasons.includes(patchCheck.reason || ""))
-                );
-
-                if (needsRetry) {
+                if (!validatedDraft.ok && validatedDraft.reason === "qwen_json_parse_failed") {
                     qwenRetryUsed = true;
-                    let retryPrompt = `Your previous answer was not in the required format.
-You must return ONLY FILE / START_LINE / END_LINE / REPLACE.
-Any other format will be rejected.
-
-FILE: ${targetFile}
-START_LINE: <number>
-END_LINE: <number>
-REPLACE:
-<replacement code>
-
-No markdown.
-No explanation.
-No FIND/REPLACE.`;
-                    
-                    if (qwenUnifiedDiffViolation && hasExactOriginalFileContent) {
-                        retryPrompt = `Your previous answer used unified diff. That is invalid.
-You must return ONLY FILE / START_LINE / END_LINE / REPLACE.
-Any other format will be rejected.
-
-FILE: ${targetFile}
-START_LINE: <number>
-END_LINE: <number>
-REPLACE:
-<replacement code>
-
-No markdown.
-No explanation.
-No unified diff.
-No --- +++ @@.
-No FIND/REPLACE.
-FILE must exactly equal ${targetFile}.`;
-                    } else if (!patchCheck.ok && failedReasons.includes(patchCheck.reason || "")) {
-                        if (hasExactOriginalFileContent) {
-                            if (patchCheck.reason === "line_range_out_of_bounds") {
-                                retryPrompt = `Your previous patch used line numbers outside the file.
-The target file has exactly ${totalLineCount} lines.
-Return ONLY line-range format.
-
-FILE: ${targetFile}
-START_LINE: <number between 1 and ${totalLineCount}>
-END_LINE: <number between START_LINE and ${totalLineCount}>
-REPLACE: <replacement code>
-
-Rules:
-- START_LINE and END_LINE must be between 1 and ${totalLineCount}.
-- Use line numbers from ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS only.
-- Choose the smallest safe line range.
-- Do not include line numbers in REPLACE.
-- Do not use FIND/REPLACE.
-- Do not use unified diff.
-- Do not use --- +++ @@.
-- Do not include markdown.
-- Do not explain.`;
-                            } else if (patchCheck.reason === "file_mismatch") {
-                                retryPrompt = `Your previous patch used the wrong FILE value.
-Return ONLY line-range format.
-
-FILE: ${targetFile}
-START_LINE: <number>
-END_LINE: <number>
-REPLACE: <replacement code>
-
-Rules:
-- FILE must exactly equal ${targetFile}.
-- Use the line numbers from ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS.
-- Choose the smallest safe line range.
-- Do not include line numbers in REPLACE.
-- Do not use FIND/REPLACE.
-- Do not use unified diff.
-- Do not use --- +++ @@.
-- Do not include markdown.
-- Do not explain.`;
-                            } else if ((patchCheck.reason || "").includes("find_block_not_found_in_context") || (patchCheck.reason || "").includes("find_block_matches_multiple")) {
-                                retryPrompt = `Your previous patch used a FIND block that does not match the exact file context.
-Return ONLY line-range format.
-
-FILE: ${targetFile}
-START_LINE: <number from ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS>
-END_LINE: <number from ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS>
-REPLACE: <replacement code>
-
-Rules:
-- FILE must exactly equal ${targetFile}.
-- START_LINE and END_LINE must be from the numbered file.
-- REPLACE must not include line numbers.
-- Choose the smallest safe line range.
-- Do not use FIND/REPLACE.
-- Do not use unified diff.
-- Do not use --- +++ @@.
-- Do not include markdown.
-- Do not explain.`;
-                            } else {
-                                retryPrompt = `Your previous patch could not be applied.
-Return ONLY line-range format.
-
-FILE: ${targetFile}
-START_LINE: <number>
-END_LINE: <number>
-REPLACE: <replacement code>
-
-Rules:
-- Use the line numbers from ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS.
-- Choose the smallest safe line range.
-- Do not include line numbers in REPLACE.
-- Do not use FIND/REPLACE.
-- Do not use unified diff.
-- Do not use --- +++ @@.
-- Do not include markdown.
-- Do not explain.`;
-                            }
-                        } else {
-                            retryPrompt = `Your previous patch could not be applied by the Gateway.
-Return ONLY FIND/REPLACE format, not unified diff.
-
-Required format:
-FILE: <target file path>
-FIND:
-<copy exactly 5 to 25 consecutive lines from ORIGINAL_FILE_CONTENT>
-REPLACE:
-<full replacement for those exact lines>
-
-Rules:
-- Do not use --- +++ @@ unified diff.
-- FIND must exist exactly once in ORIGINAL_FILE_CONTENT.
-- FIND must contain enough surrounding context.
-- If changing a large block, include a larger FIND block so REPLACE is not more than 3x FIND.
-- Do not explain.`;
-                        }
-                    }
-
-                    qwenResult = await callQwen(retryPrompt);
+                    qwenResult = await callQwen(`Your previous answer was not valid JSON.
+Return one JSON object only.
+No markdown, no explanation, no patch, no line numbers, no FIND/REPLACE, no unified diff.
+Use this exact shape:
+{"target_file":"${targetFile}","target_symbol":"${focused.targetSymbol}","old_anchor":"one exact short line copied from FOCUSED_CODE_CONTEXT","change_summary":"short summary","new_code":"replacement code only"}`);
                     qwenLatencyMs = Date.now() - qwenStartTime;
                     if (qwenResult.ok) {
                         draftText = qwenResult.text;
@@ -1766,13 +1751,18 @@ Rules:
                         qwenDraftChars = draftText.length;
                         qwenInputTokens += qwenResult.inputTokens;
                         qwenOutputTokens += qwenResult.outputTokens;
+                        validatedDraft = validateQwenCodeDraft(draftText, targetFile, rawFileContent, focused.context);
                     } else {
                         qwenErrorType = `retry_http_status_${qwenResult.status}`;
                     }
                 }
 
-                qwenDraftUsed = isUsableQwenDraft(qwenDraftMode, qwenDraftChars);
+                qwenDraftMode = "code_draft";
+                qwenDraftUsed = validatedDraft.ok;
                 qwenDraftWeak = !qwenDraftUsed;
+                qwenPatchValid = validatedDraft.ok;
+                qwenPatchReason = validatedDraft.reason;
+                fallbackReason = validatedDraft.reason;
 
                 if (!draftText) {
                     qwenErrorType = "empty_draft";
@@ -1787,56 +1777,10 @@ Rules:
             qwenErrorType = error.name === "AbortError" ? "qwen_timeout" : "qwen_connection_error";
             qwenDraftWeak = true;
         }
-
-        if (draftText) {
-            parsedPatch = hasExactOriginalFileContent
-                ? (containsUnifiedDiffMarkers(draftText)
-                    ? { ok: false, mode: "invalid", reason: "qwen_format_violation_unified_diff" }
-                    : validateQwenPatch(parseQwenFindReplacePatch(draftText, rawFileContent), messages, userIntent, rawFileContent, hasExactOriginalFileContent, fileContextSource))
-                : { ok: false, mode: "invalid", reason: "no_exact_context_advisory_only" };
-            qwenPatchValid = parsedPatch.ok;
-            qwenPatchReason = parsedPatch.reason || (parsedPatch.ok ? "valid" : "invalid_patch");
-        } else {
-            qwenPatchReason = qwenErrorType || "qwen_output_empty";
         }
 
-        if (qwenPatchValid && parsedPatch.filePath && parsedPatch.find !== undefined && parsedPatch.replace !== undefined) {
-            const deepseekProvider = providerRegistry.getProvider("deepseek") as DeepSeekProvider;
-            if (deepseekProvider) {
-                deepseekApprovalUsed = true;
-                const approval = await askDeepSeekPatchApproval(deepseekProvider, clientHeaders, requestId, {
-                    userIntent,
-                    filePath: parsedPatch.filePath,
-                    patchMode: parsedPatch.mode,
-                    findLength: parsedPatch.find.length,
-                    replaceLength: parsedPatch.replace.length,
-                    riskFlags: []
-                });
-                deepseekApprovalApproved = approval.approved;
-                if (!approval.approved) {
-                    fallbackReason = `approval_rejected:${approval.reason}`;
-                } else {
-                    if (qwenRetryUsed) {
-                        fallbackReason = parsedPatch.mode === "line_range_replace" ? "retry_line_range_success" : "retry_find_replace_success";
-                    } else if (parsedPatch.mode === "line_range_replace") {
-                        fallbackReason = "line_range_replace";
-                    } else if (parsedPatch.mode === "unified_diff") {
-                        fallbackReason = "unified_diff_converted_to_find_replace";
-                    } else if (fileContextSource === "tool_result_exact") {
-                        fallbackReason = "tool_result_exact_context_used";
-                    } else if (fileContextSource === "disk_exact") {
-                        fallbackReason = "railway_disk_context_used_dev_only";
-                    }
-                }
-            } else {
-                fallbackReason = "deepseek_provider_not_registered";
-            }
-        } else if (draftText && !hasExactOriginalFileContent) {
-            fallbackReason = "no_exact_context_advisory_only";
-        } else if (draftText) {
-            fallbackReason = qwenPatchReason;
-        } else {
-            fallbackReason = qwenErrorType || "qwen_output_empty";
+        if (!qwenPatchReason) {
+            qwenPatchReason = fallbackReason || qwenErrorType || "qwen_output_empty";
         }
 
         await insertModelCall({
@@ -1850,92 +1794,33 @@ Rules:
             qwenDraftChars,
             qwenDraftWeak,
             qwenRetryUsed,
-            qwenPatchMode: parsedPatch.mode,
+            qwenPatchMode: "code_draft",
             qwenPatchValid,
             deepseekApprovalApproved: deepseekApprovalUsed ? deepseekApprovalApproved : undefined,
-            emittedToolUse: deepseekApprovalApproved ? "Edit" : undefined,
+            emittedToolUse: undefined,
             fallbackReason,
             fileContextSource,
             qwenDelegationMode,
             directEditEligible
         });
 
-        if (qwenPatchValid && deepseekApprovalApproved && parsedPatch.filePath && parsedPatch.find !== undefined && parsedPatch.replace !== undefined) {
-            const toolUseId = `toolu_qwen_edit_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
-            emittedToolUse = "Edit";
-            console.log(JSON.stringify({
-                time: new Date().toISOString(),
-                requestId,
-                mode: "hybrid-flow",
-                delegate_to_qwen: true,
-                latestUserIntentPreview: decision.latestUserIntentPreview,
-                recoveredCodeEditIntentPreview: decision.recoveredCodeEditIntentPreview,
-                inheritedCodeEditIntent: decision.inheritedCodeEditIntent,
-                continuationIntent: decision.continuationIntent,
-                qwenPatchMode: parsedPatch.mode,
-                qwenPatchValid: true,
-                qwenPatchReason,
-                qwenDraftChars,
-                qwenLatencyMs,
-                deepseekApprovalUsed,
-                deepseekApprovalApproved,
-                finalProvider: "deepseek",
-                emittedToolUse,
-                fileContextSource,
-                hasExactOriginalFileContent,
-                directEditEligible,
-                qwenDelegationMode
-            }));
-            await updateGatewayRequest(requestId, 200, qwenLatencyMs);
-            res.status(200).json({
-                id: `msg_qwen_edit_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
-                type: "message",
-                role: "assistant",
-                content: [
-                    {
-                        type: "tool_use",
-                        id: toolUseId,
-                        name: "Edit",
-                        input: {
-                            file_path: parsedPatch.filePath,
-                            old_string: parsedPatch.find,
-                            new_string: parsedPatch.replace
-                        }
-                    }
-                ],
-                model: req.body.model || "hybrid-flow",
-                stop_reason: "tool_use",
-                stop_sequence: null,
-                usage: {
-                    input_tokens: 0,
-                    output_tokens: 0
-                }
-            });
-            return;
-        }
-
         let finalBody = req.body;
-        if (draftText) {
-            const validButNotApproved = qwenPatchValid && !deepseekApprovalApproved;
-            const draftPreviewChars = (fallbackReason || qwenPatchReason) === "qwen_format_violation_unified_diff" ? 300 : 800;
-            const forwardedDraftText = validButNotApproved && hasExactOriginalFileContent ? draftText : draftText.slice(0, draftPreviewChars);
-            const advisoryIntro = qwenPatchValid
-                ? `Internal Qwen primary patch draft below.
-
-Qwen is the primary implementation writer, but Gateway could not emit Edit directly.
-Fallback reason: ${fallbackReason || "unknown"}.
-If the patch is valid, apply it using Claude Code tools.
-Do not rewrite the solution from scratch unless the draft is clearly wrong, unsafe, or inconsistent with the file context.`
-                : `Internal Qwen patch draft below.
-
-Gateway validation rejected this draft.
-Fallback reason: ${fallbackReason || qwenPatchReason || "invalid_patch"}.
-Patch mode: ${qwenDraftMode}.
-Only the first ${draftPreviewChars} chars of the rejected draft are included.
-Treat this only as advisory context. Verify against the actual file context before using it.`;
-            const exactContextInstruction = hasExactOriginalFileContent
-                ? "If applying a valid Qwen patch, use tools directly."
-                : "Exact file context is missing. Read exact file content before creating or applying any patch.";
+        if (draftText || fallbackReason) {
+            const draftPayload = qwenPatchValid && validatedDraft.draft
+                ? JSON.stringify({
+                    target_file: validatedDraft.draft.target_file,
+                    target_symbol: validatedDraft.draft.target_symbol,
+                    old_anchor: validatedDraft.draft.old_anchor,
+                    change_summary: validatedDraft.draft.change_summary,
+                    new_code: validatedDraft.draft.new_code
+                }, null, 2)
+                : JSON.stringify({
+                    fallbackReason: fallbackReason || qwenPatchReason || "invalid_patch",
+                    qwenPreview: draftText.slice(0, 300)
+                }, null, 2);
+            const deepseekHybridInstruction = qwenPatchValid
+                ? `Qwen produced a validated code draft. Use it as the primary implementation. Verify against the exact file context. Apply with tools only if safe. Do not rewrite unrelated code. Keep final response short.`
+                : `Qwen code draft was rejected by gateway validation. Use only the fallback reason and short preview below. Do not rely on the full invalid draft. Read or verify exact file context before applying any change. Keep final response short.`;
             const augmentedMessages = [
                 ...req.body.messages,
                 {
@@ -1943,26 +1828,31 @@ Treat this only as advisory context. Verify against the actual file context befo
                     content: [
                         {
                             type: "text",
-                            text: `${advisoryIntro}
+                            text: `You are the planner, verifier, and tool controller.
+Use Qwen code draft if valid.
+Verify against exact file context before applying.
+Make the smallest safe change.
+Do not rewrite unrelated code.
+Do not overbuild.
+Prefer existing code patterns.
+Use tools only when safe.
+Keep final response short.
 
-Keep response short.
-Prefer tool_use/Edit only if verified.
-max final explanation 3 bullets.
-${exactContextInstruction}
-Do not generate another full implementation unless Qwen draft is wrong.
+${deepseekHybridInstruction}
 
-<QWEN_DRAFT mode="${qwenDraftMode}" chars="${qwenDraftChars}">
-${forwardedDraftText}
-</QWEN_DRAFT>`
+<QWEN_CODE_DRAFT mode="code_draft" valid="${qwenPatchValid}" reason="${fallbackReason || qwenPatchReason}">
+${draftPayload}
+</QWEN_CODE_DRAFT>`
                         }
                     ]
                 }
             ];
             const originalMaxTokens = typeof req.body.max_tokens === "number" ? req.body.max_tokens : undefined;
+            const cap = qwenPatchValid ? 1000 : 700;
             finalBody = {
                 ...req.body,
                 messages: augmentedMessages,
-                max_tokens: originalMaxTokens === undefined ? 700 : Math.min(originalMaxTokens, 700)
+                max_tokens: originalMaxTokens === undefined ? cap : Math.min(originalMaxTokens, cap)
             };
         }
 
@@ -1984,17 +1874,25 @@ ${forwardedDraftText}
             qwenDraftWeak,
             qwenRetryUsed,
             qwenErrorType,
-            qwenPatchMode: parsedPatch.mode,
+            qwenRole: "code_writer",
+            qwenPatchMode: "code_draft",
             qwenPatchValid,
             qwenPatchReason,
+            qwenAnchorValid: validatedDraft.ok,
+            qwenDraftValid: qwenPatchValid,
+            qwenValidationReason: fallbackReason || qwenPatchReason,
             deepseekApprovalUsed,
             deepseekApprovalApproved,
             reducedContextChars,
+            focusedContextChars: focused.chars,
+            focusedContextLines: focused.lines,
             qwenLatencyMs,
             reason: decision.reason,
             finalProvider: "deepseek",
             emittedToolUse,
             fallbackReason,
+            qwenSkippedReason: !hasExactOriginalFileContent ? fallbackReason : undefined,
+            deepseekApplyMode: "verify_and_apply",
             fileContextSource,
             hasExactOriginalFileContent,
             directEditEligible,

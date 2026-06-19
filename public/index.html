@@ -494,7 +494,7 @@
             <div class="card">
                 <span class="card-title">Qwen Failed Count</span>
                 <span class="card-value" id="qwenFailedCount">0</span>
-                <span class="card-sub">qwen_patch_valid=false</span>
+                <span class="card-sub">code_draft validation failed</span>
             </div>
             <div class="card">
                 <span class="card-title">Top Fallback Reason</span>
@@ -522,7 +522,7 @@
                         <option value="qwen_failed">Qwen Failed</option>
                         <option value="advisory_only">Advisory Only</option>
                         <option value="file_mismatch">File Mismatch</option>
-                        <option value="line_range_error">Line Range Error</option>
+                        <option value="draft_context_error">Draft Context Error</option>
                         <option value="deepseek_fallback">DeepSeek Fallback</option>
                         <option value="exact_context">Exact Context Only</option>
                     </select>
@@ -607,6 +607,11 @@
         function getReasonBadge(reason) {
             if (!reason) return `<span class="cell-muted">-</span>`;
             if (reason === "file_mismatch") return badge("FILE_MISMATCH", "red");
+            if (reason === "qwen_anchor_not_found") return badge("ANCHOR_MISSING", "red");
+            if (reason === "qwen_anchor_ambiguous") return badge("ANCHOR_AMBIGUOUS", "yellow");
+            if (reason === "qwen_format_violation_diff") return badge("DIFF_REJECTED", "red");
+            if (reason === "skipped_no_exact_context") return badge("NO_EXACT_CONTEXT", "yellow");
+            if (reason === "qwen_code_draft_valid") return badge("DRAFT_VALID", "green");
             if (reason.includes("line_range")) return badge("LINE_RANGE_ERROR", "red");
             if (reason.includes("advisory_only") || reason === "no_workspace_file_on_gateway" || reason === "file_not_found_on_disk") return badge("ADVISORY_ONLY", "yellow");
             if (reason.startsWith("approval_rejected") || reason === "approval_parse_failed") return badge(reason, "yellow");
@@ -625,7 +630,7 @@
 
         function getStatusBadge(call) {
             const status = getPatchStatus(call);
-            if (status === "VALID" || status === "APPROVED") return badge(status, "green");
+            if (status === "VALID" || status === "APPROVED") return badge(status === "VALID" ? "DRAFT_VALID" : status, "green");
             if (status === "FAILED") return badge(status, "red");
             if (status === "ADVISORY_ONLY") return badge(status, "yellow");
             return badge(status, "gray");
@@ -641,15 +646,20 @@
         function getFixHint(call) {
             const reason = call.fallback_reason || call.qwen_patch_reason || "";
             if (reason === "file_mismatch") return "Normalize path or force FILE to exact targetFile";
-            if (reason === "line_range_out_of_bounds") return "Retry with total line count and bounded START_LINE/END_LINE";
-            if (reason === "tool_result_partial_context_advisory_only") return "Read exact file content before Qwen patch";
-            if (reason === "no_exact_context_advisory_only") return "Read exact file content before Qwen patch";
-            if (reason === "reduced_context_advisory_only") return "Do not validate patch from reduced context";
+            if (reason === "qwen_code_draft_valid") return "Qwen wrote code draft; DeepSeek verifies/applies";
+            if (reason === "qwen_anchor_not_found") return "Anchor missing; improve context extraction";
+            if (reason === "qwen_anchor_ambiguous") return "Anchor ambiguous; need more focused context";
+            if (reason === "qwen_format_violation_diff") return "Qwen returned diff; rejected and fallback short";
+            if (reason === "skipped_no_exact_context") return "Read exact file before Qwen";
+            if (reason === "no_exact_context_advisory_only") return "No exact context; Qwen advisory only";
+            if (reason === "line_range_out_of_bounds") return "Legacy line-range draft rejected";
+            if (reason === "tool_result_partial_context_advisory_only") return "Read exact file content before Qwen draft";
+            if (reason === "reduced_context_advisory_only") return "Do not validate draft from reduced context";
             if (reason === "no_workspace_file_on_gateway") return "Enable exact tool_result context; avoid Railway disk dependency";
             if (reason === "approval_parse_failed") return "Force approval model to return JSON only";
             if (reason === "replace_too_large") return "Reduce patch range or allow explicit large rewrite only";
-            if (reason === "find_block_not_found_in_context") return "Use line_range_replace from exact numbered file";
-            if (reason === "unified_diff" || call.qwen_draft_mode === "unified_diff" || call.qwen_patch_mode === "unified_diff") return "Retry as line_range_replace";
+            if (reason === "find_block_not_found_in_context") return "Legacy FIND block missing; use code_draft";
+            if (reason === "unified_diff" || call.qwen_draft_mode === "unified_diff" || call.qwen_patch_mode === "unified_diff") return "Reject diff; request JSON code_draft";
             return "-";
         }
 
@@ -692,7 +702,7 @@
             if (filter === "qwen_failed") return isQwenCall(call) && call.qwen_patch_valid === false;
             if (filter === "advisory_only") return isQwenCall(call) && isAdvisoryOnly(call);
             if (filter === "file_mismatch") return isQwenCall(call) && call.fallback_reason === "file_mismatch";
-            if (filter === "line_range_error") return isQwenCall(call) && isLineRangeError(call);
+            if (filter === "draft_context_error") return isQwenCall(call) && ["qwen_anchor_not_found", "qwen_anchor_ambiguous", "skipped_no_exact_context"].includes(call.fallback_reason || "");
             if (filter === "deepseek_fallback") {
                 const fallbackRequestIds = new Set(currentRecentCalls
                     .filter(row => isQwenCall(row) && (row.qwen_patch_valid === false || (row.fallback_reason && !row.deepseek_approval_approved)))
