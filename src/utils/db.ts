@@ -55,7 +55,14 @@ export async function initDb() {
                 saved_output_usd NUMERIC(12, 6) DEFAULT 0,
                 saved_output_thb NUMERIC(12, 6) DEFAULT 0,
                 qwen_draft_mode VARCHAR(32),
-                qwen_draft_chars INTEGER DEFAULT 0
+                qwen_draft_chars INTEGER DEFAULT 0,
+                qwen_draft_weak BOOLEAN DEFAULT false,
+                qwen_retry_used BOOLEAN DEFAULT false,
+                qwen_patch_mode VARCHAR(32),
+                qwen_patch_valid BOOLEAN,
+                deepseek_approval_approved BOOLEAN,
+                emitted_tool_use VARCHAR(64),
+                fallback_reason VARCHAR(255)
             );
         `);
 
@@ -70,6 +77,13 @@ export async function initDb() {
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS saved_output_thb NUMERIC(12, 6) DEFAULT 0;`);
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS qwen_draft_mode VARCHAR(32);`);
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS qwen_draft_chars INTEGER DEFAULT 0;`);
+        await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS qwen_draft_weak BOOLEAN DEFAULT false;`);
+        await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS qwen_retry_used BOOLEAN DEFAULT false;`);
+        await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS qwen_patch_mode VARCHAR(32);`);
+        await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS qwen_patch_valid BOOLEAN;`);
+        await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS deepseek_approval_approved BOOLEAN;`);
+        await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS emitted_tool_use VARCHAR(64);`);
+        await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS fallback_reason VARCHAR(255);`);
 
         console.log("Database tables initialized successfully.");
     } catch (err) {
@@ -122,6 +136,13 @@ export async function insertModelCall(params: {
     savedOutputThb?: number;
     qwenDraftMode?: string;
     qwenDraftChars?: number;
+    qwenDraftWeak?: boolean;
+    qwenRetryUsed?: boolean;
+    qwenPatchMode?: string;
+    qwenPatchValid?: boolean;
+    deepseekApprovalApproved?: boolean;
+    emittedToolUse?: string;
+    fallbackReason?: string;
 }) {
     if (!pool) return;
     try {
@@ -139,7 +160,14 @@ export async function insertModelCall(params: {
             savedOutputUsd = 0,
             savedOutputThb = 0,
             qwenDraftMode,
-            qwenDraftChars = 0
+            qwenDraftChars = 0,
+            qwenDraftWeak = false,
+            qwenRetryUsed = false,
+            qwenPatchMode,
+            qwenPatchValid,
+            deepseekApprovalApproved,
+            emittedToolUse,
+            fallbackReason
         } = params;
 
         let inputCostUsd = params.inputCostUsd || 0;
@@ -165,8 +193,8 @@ export async function insertModelCall(params: {
 
         await pool.query(
             `INSERT INTO model_calls 
-            (request_id, provider, model, input_tokens, output_tokens, cache_hit_input_tokens, cache_miss_input_tokens, latency_ms, cost_usd, cost_thb, saved_usd, saved_thb, input_cost_usd, input_cost_thb, output_cost_usd, output_cost_thb, saved_input_usd, saved_input_thb, saved_output_usd, saved_output_thb, qwen_draft_mode, qwen_draft_chars) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)`,
+            (request_id, provider, model, input_tokens, output_tokens, cache_hit_input_tokens, cache_miss_input_tokens, latency_ms, cost_usd, cost_thb, saved_usd, saved_thb, input_cost_usd, input_cost_thb, output_cost_usd, output_cost_thb, saved_input_usd, saved_input_thb, saved_output_usd, saved_output_thb, qwen_draft_mode, qwen_draft_chars, qwen_draft_weak, qwen_retry_used, qwen_patch_mode, qwen_patch_valid, deepseek_approval_approved, emitted_tool_use, fallback_reason) 
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)`,
             [
                 requestId,
                 provider,
@@ -189,7 +217,14 @@ export async function insertModelCall(params: {
                 savedOutputUsd,
                 savedOutputThb,
                 qwenDraftMode || null,
-                qwenDraftChars
+                qwenDraftChars,
+                qwenDraftWeak,
+                qwenRetryUsed,
+                qwenPatchMode || null,
+                qwenPatchValid ?? null,
+                deepseekApprovalApproved ?? null,
+                emittedToolUse || null,
+                fallbackReason || null
             ]
         );
     } catch (err) {

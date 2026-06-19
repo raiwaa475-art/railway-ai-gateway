@@ -352,7 +352,8 @@ gatewayRouter.get("/admin/usage/summary", authMiddleware, async (req, res) => {
             total_saved_output_usd: 0,
             total_saved_output_thb: 0,
             total_input_tokens: 0,
-            total_output_tokens: 0
+            total_output_tokens: 0,
+            tokens_by_model: []
         });
     }
 
@@ -376,6 +377,17 @@ gatewayRouter.get("/admin/usage/summary", authMiddleware, async (req, res) => {
                 COALESCE(SUM(output_tokens), 0) as total_output_tokens
             FROM model_calls
             WHERE 1=1 ${timeFilter}
+        `);
+        const modelTokensRes = await pool.query(`
+            SELECT
+                provider,
+                model,
+                COALESCE(SUM(input_tokens), 0) as input_tokens,
+                COALESCE(SUM(output_tokens), 0) as output_tokens
+            FROM model_calls
+            WHERE 1=1 ${timeFilter}
+            GROUP BY provider, model
+            ORDER BY COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) DESC
         `);
 
         const grossCostUsd = Number(callsRes.rows[0].total_cost_usd);
@@ -402,7 +414,13 @@ gatewayRouter.get("/admin/usage/summary", authMiddleware, async (req, res) => {
             total_saved_output_usd: Number(callsRes.rows[0].total_saved_output_usd),
             total_saved_output_thb: Number(callsRes.rows[0].total_saved_output_thb),
             total_input_tokens: Number(callsRes.rows[0].total_input_tokens),
-            total_output_tokens: Number(callsRes.rows[0].total_output_tokens)
+            total_output_tokens: Number(callsRes.rows[0].total_output_tokens),
+            tokens_by_model: modelTokensRes.rows.map(row => ({
+                provider: row.provider,
+                model: row.model,
+                input_tokens: Number(row.input_tokens),
+                output_tokens: Number(row.output_tokens)
+            }))
         });
     } catch (err: any) {
         res.status(500).json({ error: err.message });
