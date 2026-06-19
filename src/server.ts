@@ -21,6 +21,8 @@ app.use((err: any, _req: any, res: any, next: any) => {
     next(err);
 });
 
+import { initDb } from "./utils/db.js";
+
 const port = config.port;
 
 // Use Gateway Router
@@ -37,6 +39,8 @@ app.use((_req, res) => {
     });
 });
 
-app.listen(port, () => {
-    console.log(`Railway AI Gateway v0.2.0 running on port ${port}`);
+initDb().then(() => {
+    app.listen(port, () => {
+        console.log(`Railway AI Gateway v0.2.0 running on port ${port}`);
+    });
 });

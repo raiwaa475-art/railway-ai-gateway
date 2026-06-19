@@ -31,5 +31,10 @@ export const config = {
     deepseekAnthropicBaseUrl: process.env.DEEPSEEK_ANTHROPIC_BASE_URL || "https://api.deepseek.com/anthropic",
     defaultModel: process.env.DEFAULT_MODEL || "deepseek-v4-flash",
     qwenLocalApiUrl: process.env.QWEN_LOCAL_API_URL || "http://localhost:11434/v1",
-    qwenLocalModel: process.env.QWEN_LOCAL_MODEL || "qwen2.5-coder-3b-instruct"
+    qwenLocalModel: process.env.QWEN_LOCAL_MODEL || "qwen2.5-coder-3b-instruct",
+    databaseUrl: process.env.DATABASE_URL || "",
+    usdThbRate: Number(process.env.USD_THB_RATE || 35.0),
+    deepseekInputCacheHitUsdPer1M: Number(process.env.DEEPSEEK_INPUT_CACHE_HIT_USD_PER_1M || 0.07),
+    deepseekInputCacheMissUsdPer1M: Number(process.env.DEEPSEEK_INPUT_CACHE_MISS_USD_PER_1M || 0.27),
+    deepseekOutputUsdPer1M: Number(process.env.DEEPSEEK_OUTPUT_USD_PER_1M || 1.10)
 };
