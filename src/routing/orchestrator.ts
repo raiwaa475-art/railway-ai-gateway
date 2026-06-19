@@ -56,6 +56,17 @@ function extractJsonFromString(str: string): any {
     return JSON.parse(jsonSub);
 }
 
+function extractJsonObject(text: string): any {
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+
+    if (start === -1 || end === -1 || end <= start) {
+        throw new Error("No JSON object found");
+    }
+
+    return JSON.parse(text.slice(start, end + 1));
+}
+
 interface RouterDecision {
     delegate_to_qwen: boolean;
     task_type: string;
@@ -111,7 +122,11 @@ export class OrchestratorService {
 Decide whether the current request should call Qwen Local as an internal code draft generator.
 
 Rules:
-- Return raw JSON only. Do not wrap in markdown blocks, do not explain, do not output XML/thought/tool_calls tags.
+- Return ONLY one valid minified JSON object.
+- No markdown.
+- No explanation.
+- No code fence.
+- No text before or after JSON.
 - delegate_to_qwen=true only when:
   1. the user wants code to be written, edited, fixed, refactored, or generated
   2. there is enough file/tool context for Qwen to draft a useful patch
@@ -124,12 +139,7 @@ Rules:
   - tool context is missing or insufficient
 
 Output format exactly:
-{
-  "delegate_to_qwen": boolean,
-  "task_type": "chat" | "read" | "explain" | "code_edit" | "debug" | "test" | "review" | "unknown",
-  "reason": "short reason",
-  "qwen_instruction": "short instruction for Qwen if delegate_to_qwen is true"
-}`;
+{"delegate_to_qwen":boolean,"task_type":"chat|read|explain|code_edit|debug|test|review|unknown","reason":"short reason","qwen_instruction":"short instruction for Qwen if delegate_to_qwen is true"}`;
 
         const routerMessages = [
             {
@@ -143,8 +153,8 @@ Output format exactly:
             system: routerPrompt,
             messages: routerMessages,
             stream: false,
-            max_tokens: 256,
-            temperature: 0.1
+            max_tokens: 300,
+            temperature: 0
         };
 
         const startTime = Date.now();
@@ -163,7 +173,18 @@ Output format exactly:
             text = textBlock?.text || textBlock?.thinking || "";
         }
 
-        const decision: RouterDecision = extractJsonFromString(text);
+        let decision: RouterDecision;
+        try {
+            decision = extractJsonObject(text);
+        } catch (err) {
+            console.error(JSON.stringify({
+                time: new Date().toISOString(),
+                requestId,
+                routerParseFailed: true,
+                responsePreview: text.slice(0, 120)
+            }));
+            throw err;
+        }
 
         // Log delegation router model call
         const inputTokens = data.usage?.input_tokens || 0;
@@ -280,11 +301,20 @@ Output format exactly:
 
         let savedUsd = 0;
         let savedThb = 0;
+        let savedInputUsd = 0;
+        let savedInputThb = 0;
+        let savedOutputUsd = 0;
+        let savedOutputThb = 0;
+
         if (qwenSavings) {
             const missRate = config.deepseekInputCacheMissUsdPer1M / 1000000;
             const outRate = config.deepseekOutputUsdPer1M / 1000000;
-            savedUsd = (qwenSavings.inputTokens * missRate) + (qwenSavings.outputTokens * outRate);
-            savedThb = savedUsd * config.usdThbRate;
+            savedInputUsd = qwenSavings.inputTokens * missRate;
+            savedInputThb = savedInputUsd * config.usdThbRate;
+            savedOutputUsd = qwenSavings.outputTokens * outRate;
+            savedOutputThb = savedOutputUsd * config.usdThbRate;
+            savedUsd = savedInputUsd + savedOutputUsd;
+            savedThb = savedInputThb + savedOutputThb;
         }
 
         await insertModelCall({
@@ -297,7 +327,11 @@ Output format exactly:
             cacheMissInputTokens: inputTokens - cacheReadTokens,
             latencyMs: callLatencyMs,
             savedUsd,
-            savedThb
+            savedThb,
+            savedInputUsd,
+            savedInputThb,
+            savedOutputUsd,
+            savedOutputThb
         });
 
         await updateGatewayRequest(requestId, deepseekRes.status, callLatencyMs);

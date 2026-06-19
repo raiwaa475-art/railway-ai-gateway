@@ -45,9 +45,28 @@ export async function initDb() {
                 cost_usd NUMERIC(12, 6),
                 cost_thb NUMERIC(12, 6),
                 saved_usd NUMERIC(12, 6) DEFAULT 0,
-                saved_thb NUMERIC(12, 6) DEFAULT 0
+                saved_thb NUMERIC(12, 6) DEFAULT 0,
+                input_cost_usd NUMERIC(12, 6) DEFAULT 0,
+                input_cost_thb NUMERIC(12, 6) DEFAULT 0,
+                output_cost_usd NUMERIC(12, 6) DEFAULT 0,
+                output_cost_thb NUMERIC(12, 6) DEFAULT 0,
+                saved_input_usd NUMERIC(12, 6) DEFAULT 0,
+                saved_input_thb NUMERIC(12, 6) DEFAULT 0,
+                saved_output_usd NUMERIC(12, 6) DEFAULT 0,
+                saved_output_thb NUMERIC(12, 6) DEFAULT 0
             );
         `);
+
+        // Safely add columns to existing tables
+        await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS input_cost_usd NUMERIC(12, 6) DEFAULT 0;`);
+        await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS input_cost_thb NUMERIC(12, 6) DEFAULT 0;`);
+        await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS output_cost_usd NUMERIC(12, 6) DEFAULT 0;`);
+        await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS output_cost_thb NUMERIC(12, 6) DEFAULT 0;`);
+        await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS saved_input_usd NUMERIC(12, 6) DEFAULT 0;`);
+        await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS saved_input_thb NUMERIC(12, 6) DEFAULT 0;`);
+        await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS saved_output_usd NUMERIC(12, 6) DEFAULT 0;`);
+        await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS saved_output_thb NUMERIC(12, 6) DEFAULT 0;`);
+
         console.log("Database tables initialized successfully.");
     } catch (err) {
         console.error("Failed to initialize database tables:", err);
@@ -87,8 +106,16 @@ export async function insertModelCall(params: {
     cacheHitInputTokens?: number;
     cacheMissInputTokens?: number;
     latencyMs: number;
+    inputCostUsd?: number;
+    inputCostThb?: number;
+    outputCostUsd?: number;
+    outputCostThb?: number;
     savedUsd?: number;
     savedThb?: number;
+    savedInputUsd?: number;
+    savedInputThb?: number;
+    savedOutputUsd?: number;
+    savedOutputThb?: number;
 }) {
     if (!pool) return;
     try {
@@ -100,27 +127,38 @@ export async function insertModelCall(params: {
             outputTokens,
             latencyMs,
             savedUsd = 0,
-            savedThb = 0
+            savedThb = 0,
+            savedInputUsd = 0,
+            savedInputThb = 0,
+            savedOutputUsd = 0,
+            savedOutputThb = 0
         } = params;
 
-        let costUsd = 0;
-        let costThb = 0;
+        let inputCostUsd = params.inputCostUsd || 0;
+        let inputCostThb = params.inputCostThb || 0;
+        let outputCostUsd = params.outputCostUsd || 0;
+        let outputCostThb = params.outputCostThb || 0;
         let cacheHit = params.cacheHitInputTokens || 0;
         let cacheMiss = params.cacheMissInputTokens ?? inputTokens;
 
-        if (provider === "deepseek") {
+        if (provider === "deepseek" && !params.inputCostUsd) {
             const hitRate = config.deepseekInputCacheHitUsdPer1M / 1000000;
             const missRate = config.deepseekInputCacheMissUsdPer1M / 1000000;
             const outRate = config.deepseekOutputUsdPer1M / 1000000;
 
-            costUsd = (cacheHit * hitRate) + (cacheMiss * missRate) + (outputTokens * outRate);
-            costThb = costUsd * config.usdThbRate;
+            inputCostUsd = (cacheHit * hitRate) + (cacheMiss * missRate);
+            inputCostThb = inputCostUsd * config.usdThbRate;
+            outputCostUsd = outputTokens * outRate;
+            outputCostThb = outputCostUsd * config.usdThbRate;
         }
+
+        const costUsd = inputCostUsd + outputCostUsd;
+        const costThb = inputCostThb + outputCostThb;
 
         await pool.query(
             `INSERT INTO model_calls 
-            (request_id, provider, model, input_tokens, output_tokens, cache_hit_input_tokens, cache_miss_input_tokens, latency_ms, cost_usd, cost_thb, saved_usd, saved_thb) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+            (request_id, provider, model, input_tokens, output_tokens, cache_hit_input_tokens, cache_miss_input_tokens, latency_ms, cost_usd, cost_thb, saved_usd, saved_thb, input_cost_usd, input_cost_thb, output_cost_usd, output_cost_thb, saved_input_usd, saved_input_thb, saved_output_usd, saved_output_thb) 
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
             [
                 requestId,
                 provider,
@@ -133,7 +171,15 @@ export async function insertModelCall(params: {
                 costUsd,
                 costThb,
                 savedUsd,
-                savedThb
+                savedThb,
+                inputCostUsd,
+                inputCostThb,
+                outputCostUsd,
+                outputCostThb,
+                savedInputUsd,
+                savedInputThb,
+                savedOutputUsd,
+                savedOutputThb
             ]
         );
     } catch (err) {

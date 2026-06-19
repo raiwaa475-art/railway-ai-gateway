@@ -312,15 +312,27 @@
             </div>
 
             <div class="card">
-                <span class="card-title">Estimated Cost</span>
+                <span class="card-title">Estimated Gross Cost</span>
                 <span class="card-value" id="statCostUSD">$0.00</span>
                 <span class="card-sub" id="statCostTHB">฿0.00 THB</span>
+                <span class="card-sub" id="statCostBreakdown" style="margin-top: 0.5rem; font-size: 0.75rem; border-top: 1px solid var(--card-border); padding-top: 0.4rem; display: block; opacity: 0.8;">
+                    In: $0.0000 | Out: $0.0000
+                </span>
             </div>
 
             <div class="card saving">
                 <span class="card-title">Saved Cost (Qwen Local)</span>
                 <span class="card-value" id="statSavedUSD" style="color: var(--success-color);">$0.00</span>
                 <span class="card-sub" id="statSavedTHB" style="color: var(--success-color);">฿0.00 THB</span>
+                <span class="card-sub" id="statSavedBreakdown" style="color: var(--success-color); margin-top: 0.5rem; font-size: 0.75rem; border-top: 1px solid var(--card-border); padding-top: 0.4rem; display: block; opacity: 0.8;">
+                    In: $0.0000 | Out: $0.0000
+                </span>
+            </div>
+
+            <div class="card">
+                <span class="card-title">Net Cost After Saving</span>
+                <span class="card-value" id="statNetUSD">$0.00</span>
+                <span class="card-sub" id="statNetTHB">฿0.00 THB</span>
             </div>
         </div>
 
@@ -418,10 +430,15 @@
                 const summary = await summaryRes.json();
                 document.getElementById("statRequests").innerText = summary.total_requests.toLocaleString();
                 document.getElementById("statTokens").innerText = `${(summary.total_input_tokens + summary.total_output_tokens).toLocaleString()} tokens used`;
+                const baht = "\u0e3f";
                 document.getElementById("statCostUSD").innerText = `$${summary.total_cost_usd.toFixed(4)}`;
-                document.getElementById("statCostTHB").innerText = `฿${summary.total_cost_thb.toFixed(2)} THB`;
+                document.getElementById("statCostTHB").innerText = `${baht}${summary.total_cost_thb.toFixed(2)} THB`;
+                document.getElementById("statCostBreakdown").innerText = `In: $${summary.total_input_cost_usd.toFixed(4)} | Out: $${summary.total_output_cost_usd.toFixed(4)}`;
                 document.getElementById("statSavedUSD").innerText = `$${summary.total_saved_usd.toFixed(4)}`;
-                document.getElementById("statSavedTHB").innerText = `฿${summary.total_saved_thb.toFixed(2)} THB`;
+                document.getElementById("statSavedTHB").innerText = `${baht}${summary.total_saved_thb.toFixed(2)} THB`;
+                document.getElementById("statSavedBreakdown").innerText = `In: $${summary.total_saved_input_usd.toFixed(4)} | Out: $${summary.total_saved_output_usd.toFixed(4)}`;
+                document.getElementById("statNetUSD").innerText = `$${summary.total_net_cost_usd.toFixed(4)}`;
+                document.getElementById("statNetTHB").innerText = `${baht}${summary.total_net_cost_thb.toFixed(2)} THB`;
 
                 // Fetch recent calls
                 const recentRes = await fetch("/admin/usage/recent?limit=50", {

@@ -339,8 +339,18 @@ gatewayRouter.get("/admin/usage/summary", authMiddleware, async (req, res) => {
             total_requests: 0,
             total_cost_usd: 0,
             total_cost_thb: 0,
+            total_input_cost_usd: 0,
+            total_input_cost_thb: 0,
+            total_output_cost_usd: 0,
+            total_output_cost_thb: 0,
             total_saved_usd: 0,
             total_saved_thb: 0,
+            total_net_cost_usd: 0,
+            total_net_cost_thb: 0,
+            total_saved_input_usd: 0,
+            total_saved_input_thb: 0,
+            total_saved_output_usd: 0,
+            total_saved_output_thb: 0,
             total_input_tokens: 0,
             total_output_tokens: 0
         });
@@ -352,20 +362,45 @@ gatewayRouter.get("/admin/usage/summary", authMiddleware, async (req, res) => {
             SELECT 
                 COALESCE(SUM(cost_usd), 0) as total_cost_usd,
                 COALESCE(SUM(cost_thb), 0) as total_cost_thb,
+                COALESCE(SUM(input_cost_usd), 0) as total_input_cost_usd,
+                COALESCE(SUM(input_cost_thb), 0) as total_input_cost_thb,
+                COALESCE(SUM(output_cost_usd), 0) as total_output_cost_usd,
+                COALESCE(SUM(output_cost_thb), 0) as total_output_cost_thb,
                 COALESCE(SUM(saved_usd), 0) as total_saved_usd,
                 COALESCE(SUM(saved_thb), 0) as total_saved_thb,
+                COALESCE(SUM(saved_input_usd), 0) as total_saved_input_usd,
+                COALESCE(SUM(saved_input_thb), 0) as total_saved_input_thb,
+                COALESCE(SUM(saved_output_usd), 0) as total_saved_output_usd,
+                COALESCE(SUM(saved_output_thb), 0) as total_saved_output_thb,
                 COALESCE(SUM(input_tokens), 0) as total_input_tokens,
                 COALESCE(SUM(output_tokens), 0) as total_output_tokens
             FROM model_calls
             WHERE 1=1 ${timeFilter}
         `);
 
+        const grossCostUsd = Number(callsRes.rows[0].total_cost_usd);
+        const grossCostThb = Number(callsRes.rows[0].total_cost_thb);
+        const savedUsd = Number(callsRes.rows[0].total_saved_usd);
+        const savedThb = Number(callsRes.rows[0].total_saved_thb);
+        const netCostUsd = Math.max(0, grossCostUsd - savedUsd);
+        const netCostThb = Math.max(0, grossCostThb - savedThb);
+
         res.json({
             total_requests: Number(requestsRes.rows[0].count),
-            total_cost_usd: Number(callsRes.rows[0].total_cost_usd),
-            total_cost_thb: Number(callsRes.rows[0].total_cost_thb),
-            total_saved_usd: Number(callsRes.rows[0].total_saved_usd),
-            total_saved_thb: Number(callsRes.rows[0].total_saved_thb),
+            total_cost_usd: grossCostUsd,
+            total_cost_thb: grossCostThb,
+            total_input_cost_usd: Number(callsRes.rows[0].total_input_cost_usd),
+            total_input_cost_thb: Number(callsRes.rows[0].total_input_cost_thb),
+            total_output_cost_usd: Number(callsRes.rows[0].total_output_cost_usd),
+            total_output_cost_thb: Number(callsRes.rows[0].total_output_cost_thb),
+            total_saved_usd: savedUsd,
+            total_saved_thb: savedThb,
+            total_net_cost_usd: netCostUsd,
+            total_net_cost_thb: netCostThb,
+            total_saved_input_usd: Number(callsRes.rows[0].total_saved_input_usd),
+            total_saved_input_thb: Number(callsRes.rows[0].total_saved_input_thb),
+            total_saved_output_usd: Number(callsRes.rows[0].total_saved_output_usd),
+            total_saved_output_thb: Number(callsRes.rows[0].total_saved_output_thb),
             total_input_tokens: Number(callsRes.rows[0].total_input_tokens),
             total_output_tokens: Number(callsRes.rows[0].total_output_tokens)
         });
