@@ -285,6 +285,79 @@ function countOccurrences(haystack: string, needle: string): number {
     return count;
 }
 
+function parseUnifiedDiffPatch(text: string): ParsedQwenPatch {
+    const cleaned = cleanMarkdownFences(normalizeNewlines(text || "")).trim();
+    const lines = cleaned.split("\n");
+
+    let filePaths: string[] = [];
+    for (const line of lines) {
+        if (line.startsWith("+++ ")) {
+            let p = line.slice(4).trim();
+            if (p.startsWith("b/")) {
+                p = p.slice(2);
+            }
+            if (p && !filePaths.includes(p)) {
+                filePaths.push(p);
+            }
+        } else if (line.startsWith("--- ")) {
+            let p = line.slice(4).trim();
+            if (p.startsWith("a/")) {
+                p = p.slice(2);
+            }
+            if (p && !filePaths.includes(p)) {
+                filePaths.push(p);
+            }
+        }
+    }
+
+    if (filePaths.length === 0) {
+        return { ok: false, mode: "unified_diff", reason: "patch_parse_failed" };
+    }
+    if (filePaths.length > 1) {
+        return { ok: false, mode: "unified_diff", reason: "multiple_files_unsupported" };
+    }
+
+    const filePath = filePaths[0];
+
+    const findLines: string[] = [];
+    const replaceLines: string[] = [];
+
+    for (const line of lines) {
+        if (line.startsWith("---") || line.startsWith("+++") || line.startsWith("@@")) {
+            continue;
+        }
+        if (line.startsWith("\\ No newline at end of file")) {
+            continue;
+        }
+
+        if (line.startsWith("-")) {
+            findLines.push(line.slice(1));
+        } else if (line.startsWith("+")) {
+            replaceLines.push(line.slice(1));
+        } else if (line.startsWith(" ")) {
+            findLines.push(line.slice(1));
+            replaceLines.push(line.slice(1));
+        } else if (line === "") {
+            findLines.push("");
+            replaceLines.push("");
+        } else {
+            findLines.push(line);
+            replaceLines.push(line);
+        }
+    }
+
+    const find = trimOuterBlankLines(findLines.join("\n"));
+    const replace = trimOuterBlankLines(replaceLines.join("\n"));
+
+    return {
+        ok: true,
+        filePath,
+        find,
+        replace,
+        mode: "unified_diff"
+    };
+}
+
 function parseQwenFindReplacePatch(text: string): ParsedQwenPatch {
     let cleaned = normalizeNewlines(text || "");
     cleaned = cleanMarkdownFences(cleaned);
@@ -294,8 +367,12 @@ function parseQwenFindReplacePatch(text: string): ParsedQwenPatch {
         return { ok: false, mode: "invalid", reason: "empty_patch" };
     }
 
-    if (t.includes("---") && t.includes("+++") && t.includes("@@")) {
-        return { ok: false, mode: "unified_diff", reason: "patch_parse_unsupported" };
+    if (t.includes("---") && t.includes("+++")) {
+        const parsed = parseUnifiedDiffPatch(text);
+        if (parsed.ok) {
+            return parsed;
+        }
+        return { ok: false, mode: "unified_diff", reason: "patch_parse_failed" };
     }
 
     const fileMatch = t.match(/(?:^|\n)FILE:\s*(.+?)(?=\n)/);
@@ -411,17 +488,22 @@ function validateQwenPatch(
     if (blockedPathPatterns.some(pattern => filePath.includes(pattern)) && !explicitlyRequestedFile) {
         return { ...patch, ok: false, reason: "blocked_file_path" };
     }
-    if (replace.length > find.length * 3 && !explicitlyLargeRewrite) {
-        return { ...patch, ok: false, reason: "replace_too_large" };
-    }
-
     const findLines = normalizedFind.split("\n");
     if (findLines.length <= 1) {
         return { ...patch, ok: false, reason: "find_block_too_short" };
     }
 
+    const hasAtLeast5Lines = findLines.length >= 5;
+    const isTargetFileMatch = !targetFile || filePath === targetFile;
+    const canUseExpandedRatio = hasAtLeast5Lines && isTargetFileMatch && hasExactOriginalFileContent;
+    const replaceRatioLimit = explicitlyLargeRewrite ? 20 : (canUseExpandedRatio ? 5 : 3);
+
+    if (replace.length > find.length * replaceRatioLimit) {
+        return { ...patch, ok: false, reason: "replace_too_large" };
+    }
+
     if (!hasExactOriginalFileContent) {
-        return { ...patch, ok: false, reason: "no_exact_file_context_advisory_only" };
+        return { ...patch, ok: false, reason: "advisory_draft_only_no_exact_context" };
     }
 
     const normalizedFileContent = normalizeNewlines(rawFileContent);
@@ -1061,18 +1143,17 @@ Expected JSON shape:
         const hasExactOriginalFileContent = rawFileContent.length > 0 && source === "disk_or_tool_file_content";
 
         const qwenSystemPrompt = `Use ONLY the TARGET_FILE.
-Return exactly one FIND/REPLACE patch in the format:
+Return exactly one FIND/REPLACE patch.
+Do NOT return unified diff.
+Do NOT use --- +++ @@.
+Do NOT explain.
+
+Format:
 FILE: <target file path>
 FIND:
-<exact code block to find>
+<exact original block>
 REPLACE:
-<exact replacement code block>
-
-The FIND block must be copied exactly from ORIGINAL_FILE_CONTENT.
-Preserve whitespace and indentation.
-Use 5–20 surrounding lines in FIND so it matches exactly once.
-Do not edit multiple files.
-Do not explain.`;
+<replacement block>`;
 
         let qwenDraftUsed = false;
         let qwenErrorType: string | undefined = undefined;
@@ -1148,22 +1229,29 @@ Latest user intent preview: ${decision.userIntentPreview}`
 
                 let patchCheck = validateQwenPatch(parseQwenFindReplacePatch(draftText), messages, userIntent, rawFileContent, hasExactOriginalFileContent);
 
-                if (shouldRetryQwenDraft(qwenDraftMode, qwenDraftChars) || (!patchCheck.ok && patchCheck.reason === "find_block_too_short")) {
+                const needsRetry = shouldRetryQwenDraft(qwenDraftMode, qwenDraftChars) || 
+                    (!patchCheck.ok && ["patch_parse_unsupported", "patch_parse_failed", "find_block_too_short", "replace_too_large", "missing_file_find_or_replace", "empty_patch", "not_parsed"].includes(patchCheck.reason || ""));
+
+                if (needsRetry) {
                     qwenRetryUsed = true;
                     let retryPrompt = "Your previous answer was not an implementation patch.\nReturn ONLY a unified diff or FIND/REPLACE snippet.\nNo explanation. No notes. Write the actual code now.";
-                    if (!patchCheck.ok && patchCheck.reason === "find_block_too_short") {
-                        retryPrompt = `Your previous FIND block was too short.
-Return ONLY this format:
+                    
+                    if (!patchCheck.ok && ["patch_parse_unsupported", "patch_parse_failed", "find_block_too_short", "replace_too_large", "missing_file_find_or_replace", "empty_patch", "not_parsed"].includes(patchCheck.reason || "")) {
+                        retryPrompt = `Your previous patch could not be applied by the Gateway.
+Return ONLY FIND/REPLACE format, not unified diff.
+
+Required format:
 FILE: <target file path>
 FIND:
-<copy exactly 5 to 20 consecutive lines from ORIGINAL_FILE_CONTENT>
+<copy exactly 5 to 25 consecutive lines from ORIGINAL_FILE_CONTENT>
 REPLACE:
-<replacement code>
+<full replacement for those exact lines>
 
 Rules:
-- FIND must contain at least 5 non-empty lines.
+- Do not use --- +++ @@ unified diff.
 - FIND must exist exactly once in ORIGINAL_FILE_CONTENT.
-- Do not use a single-line FIND.
+- FIND must contain enough surrounding context.
+- If changing a large block, include a larger FIND block so REPLACE is not more than 3x FIND.
 - Do not explain.`;
                     }
 
@@ -1220,6 +1308,12 @@ Rules:
                 deepseekApprovalApproved = approval.approved;
                 if (!approval.approved) {
                     fallbackReason = `approval_rejected:${approval.reason}`;
+                } else {
+                    if (qwenRetryUsed) {
+                        fallbackReason = "retry_find_replace_success";
+                    } else if (parsedPatch.mode === "unified_diff") {
+                        fallbackReason = "unified_diff_converted_to_find_replace";
+                    }
                 }
             } else {
                 fallbackReason = "deepseek_provider_not_registered";
