@@ -114,6 +114,7 @@ export class OrchestratorService {
             const isStream = !!req.body.stream;
             if (isStream && qwenRes.body) {
                 res.setHeader("cache-control", "no-cache");
+                res.setHeader("x-accel-buffering", "no");
                 res.setHeader("connection", "keep-alive");
 
                 const reader = qwenRes.body.getReader();

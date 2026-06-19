@@ -130,6 +130,7 @@ gatewayRouter.post("/v1/messages", authMiddleware, async (req, res) => {
 
         if (isStream && upstream.body) {
             res.setHeader("cache-control", "no-cache");
+            res.setHeader("x-accel-buffering", "no");
             res.setHeader("connection", "keep-alive");
 
             const reader = upstream.body.getReader();

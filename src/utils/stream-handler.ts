@@ -113,7 +113,32 @@ export function createOpenAiToAnthropicStream(openAiStream: ReadableStream<Uint8
                 for (const line of lines) {
                     const trimmed = line.trim();
                     if (!trimmed) continue;
-                    if (trimmed === "data: [DONE]") continue;
+                    if (trimmed === "data: [DONE]") {
+                        const contentStop = `event: content_block_stop\ndata: ${JSON.stringify({
+                            type: "content_block_stop",
+                            index: 0
+                        })}\n\n`;
+                        controller.enqueue(encoder.encode(contentStop));
+
+                        const messageDelta = `event: message_delta\ndata: ${JSON.stringify({
+                            type: "message_delta",
+                            delta: { stop_reason: "end_turn", stop_sequence: null },
+                            usage: { output_tokens: 0 }
+                        })}\n\n`;
+                        controller.enqueue(encoder.encode(messageDelta));
+
+                        const messageStop = `event: message_stop\ndata: ${JSON.stringify({
+                            type: "message_stop"
+                        })}\n\n`;
+                        controller.enqueue(encoder.encode(messageStop));
+
+                        controller.close();
+                        try {
+                            reader.releaseLock();
+                            openAiStream.cancel();
+                        } catch {}
+                        return;
+                    }
 
                     if (trimmed.startsWith("data: ")) {
                         try {
