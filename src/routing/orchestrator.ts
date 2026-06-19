@@ -13,6 +13,148 @@ function hasToolResults(messages: any[]): boolean {
     });
 }
 
+function getLastRealUserInstruction(messages: any[]): string {
+    for (const msg of messages.slice().reverse()) {
+        if (msg.role !== "user") continue;
+
+        if (typeof msg.content === "string") {
+            const text = msg.content.trim();
+            if (text) return text;
+        }
+
+        if (Array.isArray(msg.content)) {
+            const text = msg.content
+                .filter((block: any) => block?.type === "text")
+                .map((block: any) => String(block.text || ""))
+                .join("\n")
+                .trim();
+
+            if (text) return text;
+        }
+    }
+
+    return "";
+}
+
+function isLikelyCodeEditTask(text: string): boolean {
+    const normalized = String(text || "").toLowerCase();
+    const explicitReadOnlyPatterns = [
+        "ห้ามแก้",
+        "ห้ามแก้ไฟล์",
+        "ไม่ต้องแก้",
+        "อย่าแก้",
+        "read only",
+        "do not edit",
+        "don't edit",
+        "no edit"
+    ];
+    if (explicitReadOnlyPatterns.some(pattern => normalized.includes(pattern))) {
+        return false;
+    }
+
+    const codeEditKeywords = [
+        "แก้",
+        "แก้ไข",
+        "ปรับ",
+        "เปลี่ยน",
+        "เพิ่ม",
+        "ลบ",
+        "ทำให้",
+        "เขียน",
+        "สร้าง",
+        "ใส่",
+        "update",
+        "edit",
+        "fix",
+        "change",
+        "implement",
+        "patch",
+        "refactor",
+        "bug",
+        "error",
+        "build",
+        "test",
+        "css",
+        "html",
+        "api",
+        "route",
+        "endpoint",
+        "component",
+        "function"
+    ];
+
+    if (codeEditKeywords.some(keyword => normalized.includes(keyword))) {
+        return true;
+    }
+
+    return /(^|[\s./\\_-])(tsx?|jsx?)(\b|$)/i.test(normalized);
+}
+
+function hasUsefulCodeContext(messages: any[]): boolean {
+    const codeContextMarkers = [
+        "function",
+        "const",
+        "import",
+        "export",
+        "class=",
+        "<html",
+        "route",
+        "endpoint"
+    ];
+
+    for (const msg of messages.slice(-10)) {
+        if (!Array.isArray(msg.content)) continue;
+
+        for (const block of msg.content) {
+            if (block?.type !== "tool_result") continue;
+
+            const content = typeof block.content === "string"
+                ? block.content
+                : JSON.stringify(block.content);
+            const normalized = content.toLowerCase();
+
+            if (content.length > 300 || codeContextMarkers.some(marker => normalized.includes(marker))) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+interface DeterministicRouterDecision {
+    delegate_to_qwen: boolean;
+    reason: string;
+    userIntentPreview: string;
+    likelyCodeEdit: boolean;
+    usefulCodeContext: boolean;
+}
+
+function shouldDelegateToQwen(messages: any[]): DeterministicRouterDecision {
+    const hasResults = hasToolResults(messages);
+    const userIntent = getLastRealUserInstruction(messages);
+    const likelyCodeEdit = isLikelyCodeEditTask(userIntent);
+    const usefulCodeContext = hasUsefulCodeContext(messages);
+    const delegate_to_qwen = hasResults && likelyCodeEdit && usefulCodeContext;
+
+    let reason = "Deterministic router approved Qwen delegation";
+    if (!hasResults) {
+        reason = "No tool_result context yet";
+    } else if (!likelyCodeEdit) {
+        reason = "Latest user intent is not a code edit task";
+    } else if (!usefulCodeContext) {
+        reason = "Tool results do not contain useful code context";
+    }
+
+    return {
+        delegate_to_qwen,
+        reason,
+        userIntentPreview: userIntent.slice(0, 120),
+        likelyCodeEdit,
+        usefulCodeContext
+    };
+}
+
 function extractReducedContext(messages: any[], maxChars = 8000): string {
     const parts: string[] = [];
 
@@ -389,43 +531,21 @@ Expected JSON shape:
         const messages = req.body.messages || [];
         const hasResults = hasToolResults(messages);
         const isStream = !!req.body.stream;
+        const decision = shouldDelegateToQwen(messages);
 
         // 1. If no tool results yet, pass-through directly
-        if (!hasResults) {
-            console.log(JSON.stringify({
-                time: new Date().toISOString(),
-                requestId,
-                mode: "hybrid-flow",
-                hasToolResults: false,
-                delegate_to_qwen: false,
-                finalProvider: "deepseek"
-            }));
-            await this.forwardToDeepSeek(req.body, clientHeaders, res, isStream, requestId);
-            return;
-        }
-
-        // 2. Ask DeepSeek Delegation Router
-        let decision: RouterDecision = {
-            delegate_to_qwen: false,
-            task_type: "unknown",
-            reason: "fallback",
-            qwen_instruction: ""
-        };
-
-        try {
-            decision = await this.askDeepSeekDelegationRouter(messages, clientHeaders, requestId);
-        } catch (err: any) {
-            console.error("Delegation router failure, falling back to DeepSeek:", err.message);
-        }
-
-        // 3. If router says false, pass-through directly
         if (!decision.delegate_to_qwen) {
             console.log(JSON.stringify({
                 time: new Date().toISOString(),
                 requestId,
                 mode: "hybrid-flow",
-                hasToolResults: true,
+                hasToolResults: hasResults,
+                likelyCodeEdit: decision.likelyCodeEdit,
+                usefulCodeContext: decision.usefulCodeContext,
                 delegate_to_qwen: false,
+                qwenDraftUsed: false,
+                reducedContextChars: 0,
+                qwenLatencyMs: 0,
                 reason: decision.reason,
                 finalProvider: "deepseek"
             }));
@@ -433,7 +553,7 @@ Expected JSON shape:
             return;
         }
 
-        // 4. Qwen internal coder flow
+        // 2. Qwen internal coder flow
         const qwenProvider = providerRegistry.getProvider("qwen-local") as QwenLocalProvider;
         if (!qwenProvider) {
             console.log(JSON.stringify({
@@ -441,9 +561,14 @@ Expected JSON shape:
                 requestId,
                 mode: "hybrid-flow",
                 hasToolResults: true,
+                likelyCodeEdit: decision.likelyCodeEdit,
+                usefulCodeContext: decision.usefulCodeContext,
                 delegate_to_qwen: true,
                 qwenDraftUsed: false,
                 qwenErrorType: "not_registered",
+                reducedContextChars: 0,
+                qwenLatencyMs: 0,
+                reason: decision.reason,
                 finalProvider: "deepseek"
             }));
             await this.forwardToDeepSeek(req.body, clientHeaders, res, isStream, requestId);
@@ -464,7 +589,7 @@ Do not explain broadly.`,
             messages: [
                 {
                     role: "user",
-                    content: `Context:\n${reducedContext}\n\nTask: ${decision.qwen_instruction}`
+                    content: `Context:\n${reducedContext}\n\nTask: Draft a concise patch or implementation suggestion for this code edit request.\n\nLatest user intent preview: ${decision.userIntentPreview}`
                 }
             ],
             stream: false,
@@ -540,11 +665,14 @@ Do not explain broadly.`,
             requestId,
             mode: "hybrid-flow",
             hasToolResults: true,
+            likelyCodeEdit: decision.likelyCodeEdit,
+            usefulCodeContext: decision.usefulCodeContext,
             delegate_to_qwen: true,
             qwenDraftUsed,
             qwenErrorType,
             reducedContextChars,
             qwenLatencyMs,
+            reason: decision.reason,
             finalProvider: "deepseek"
         }));
 

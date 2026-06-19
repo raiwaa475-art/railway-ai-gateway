@@ -350,6 +350,7 @@
                             <th>Model</th>
                             <th>Input Tokens</th>
                             <th>Output Tokens</th>
+                            <th>Total Tokens</th>
                             <th>Latency</th>
                             <th>Cost</th>
                             <th>Saved</th>
@@ -357,7 +358,7 @@
                     </thead>
                     <tbody id="recentTableBody">
                         <tr>
-                            <td colspan="8" style="text-align: center; color: var(--text-muted);">No records found.</td>
+                            <td colspan="9" style="text-align: center; color: var(--text-muted);">No records found.</td>
                         </tr>
                     </tbody>
                 </table>
@@ -441,19 +442,22 @@
                 document.getElementById("statNetTHB").innerText = `${baht}${summary.total_net_cost_thb.toFixed(2)} THB`;
 
                 // Fetch recent calls
-                const recentRes = await fetch("/admin/usage/recent?limit=50", {
+                const recentRes = await fetch("/admin/usage/recent?limit=10", {
                     headers: { "Authorization": `Bearer ${apiKey}` }
                 });
                 const recentCalls = await recentRes.json();
 
                 const tableBody = document.getElementById("recentTableBody");
                 if (recentCalls.length === 0) {
-                    tableBody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: var(--text-muted);">No records found.</td></tr>`;
+                    tableBody.innerHTML = `<tr><td colspan="9" style="text-align: center; color: var(--text-muted);">No records found.</td></tr>`;
                 } else {
                     tableBody.innerHTML = recentCalls.map(call => {
                         const date = new Date(call.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
                         const providerClass = call.provider === 'deepseek' ? 'deepseek' : 'qwen';
                         const providerText = call.provider === 'deepseek' ? 'DeepSeek' : 'Qwen Local';
+                        const inputTokens = Number(call.input_tokens) || 0;
+                        const outputTokens = Number(call.output_tokens) || 0;
+                        const totalTokens = inputTokens + outputTokens;
                         const cost = Number(call.cost_usd) > 0 ? `$${Number(call.cost_usd).toFixed(4)}` : '-';
                         const saved = Number(call.saved_usd) > 0 ? `$${Number(call.saved_usd).toFixed(4)}` : '-';
 
@@ -462,8 +466,9 @@
                                 <td>${date}</td>
                                 <td><span class="badge ${providerClass}">${providerText}</span></td>
                                 <td>${call.model}</td>
-                                <td>${call.input_tokens.toLocaleString()}</td>
-                                <td>${call.output_tokens.toLocaleString()}</td>
+                                <td>${inputTokens.toLocaleString()}</td>
+                                <td>${outputTokens.toLocaleString()}</td>
+                                <td>${totalTokens.toLocaleString()}</td>
                                 <td>${call.latency_ms.toLocaleString()} ms</td>
                                 <td>${cost}</td>
                                 <td style="color: ${Number(call.saved_usd) > 0 ? 'var(--success-color)' : 'inherit'}">${saved}</td>
