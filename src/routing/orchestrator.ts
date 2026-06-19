@@ -130,6 +130,26 @@ interface DeterministicRouterDecision {
     usefulCodeContext: boolean;
 }
 
+type QwenDraftMode = "unified_diff" | "snippet" | "notes" | "empty";
+
+function detectQwenDraftMode(text: string): QwenDraftMode {
+    const t = text.trim();
+    if (!t) return "empty";
+    if (t.includes("---") && t.includes("+++") && t.includes("@@")) return "unified_diff";
+    if (
+        t.includes("function") ||
+        t.includes("const ") ||
+        t.includes("import ") ||
+        t.includes("export ") ||
+        t.includes("<") ||
+        t.includes("class=") ||
+        t.includes("{")
+    ) {
+        return "snippet";
+    }
+    return "notes";
+}
+
 function shouldDelegateToQwen(messages: any[]): DeterministicRouterDecision {
     const hasResults = hasToolResults(messages);
     const userIntent = getLastRealUserInstruction(messages);
@@ -565,6 +585,9 @@ Expected JSON shape:
                 usefulCodeContext: decision.usefulCodeContext,
                 delegate_to_qwen: true,
                 qwenDraftUsed: false,
+                qwenDraftMode: "empty",
+                qwenDraftChars: 0,
+                qwenDraftWeak: true,
                 qwenErrorType: "not_registered",
                 reducedContextChars: 0,
                 qwenLatencyMs: 0,
@@ -579,28 +602,36 @@ Expected JSON shape:
         const reducedContextChars = reducedContext.length;
 
         const qwenBody = {
-            system: `You are an internal code draft generator.
+            system: `You are an internal patch generator.
 You do not control tools.
 You do not ask to read files.
-Use only the provided context.
-Return a concise patch suggestion or implementation notes.
-Prefer unified diff if enough file context exists.
-Do not explain broadly.`,
+Use only the provided reduced context.
+Return a unified diff if enough context exists.
+If unified diff is not possible, return an exact replacement snippet.
+Do not explain broadly.
+Do not include markdown fences.
+Do not include planning text.
+Prefer minimal changes.
+Preserve existing style.
+Only modify what the user requested.`,
             messages: [
                 {
                     role: "user",
-                    content: `Context:\n${reducedContext}\n\nTask: Draft a concise patch or implementation suggestion for this code edit request.\n\nLatest user intent preview: ${decision.userIntentPreview}`
+                    content: `Reduced context:\n${reducedContext}\n\nTask: Generate the primary patch draft for this code edit request.\n\nLatest user intent preview: ${decision.userIntentPreview}`
                 }
             ],
             stream: false,
-            max_tokens: 3072,
-            temperature: 0.2
+            max_tokens: 2048,
+            temperature: 0.15
         };
 
         let qwenDraftUsed = false;
         let qwenErrorType: string | undefined = undefined;
         let qwenLatencyMs = 0;
         let draftText = "";
+        let qwenDraftMode: QwenDraftMode = "empty";
+        let qwenDraftChars = 0;
+        let qwenDraftWeak = false;
         let qwenInputTokens = 0;
         let qwenOutputTokens = 0;
 
@@ -615,8 +646,11 @@ Do not explain broadly.`,
                     const textBlock = qwenData.content.find((b: any) => b?.type === "text");
                     draftText = textBlock?.text || "";
                 }
+                qwenDraftMode = detectQwenDraftMode(draftText);
+                qwenDraftChars = draftText.length;
+                qwenDraftWeak = qwenDraftMode === "empty" || qwenDraftMode === "notes";
                 if (draftText) {
-                    qwenDraftUsed = true;
+                    qwenDraftUsed = qwenDraftMode === "unified_diff" || qwenDraftMode === "snippet";
                     qwenInputTokens = qwenData.usage?.input_tokens || 0;
                     qwenOutputTokens = qwenData.usage?.output_tokens || 0;
 
@@ -627,7 +661,9 @@ Do not explain broadly.`,
                         model: config.qwenLocalModel,
                         inputTokens: qwenInputTokens,
                         outputTokens: qwenOutputTokens,
-                        latencyMs: qwenLatencyMs
+                        latencyMs: qwenLatencyMs,
+                        qwenDraftMode,
+                        qwenDraftChars
                     });
                 } else {
                     qwenErrorType = "empty_draft";
@@ -641,7 +677,7 @@ Do not explain broadly.`,
         }
 
         let finalBody = req.body;
-        if (qwenDraftUsed && draftText) {
+        if (draftText) {
             const augmentedMessages = [
                 ...req.body.messages,
                 {
@@ -649,7 +685,19 @@ Do not explain broadly.`,
                     content: [
                         {
                             type: "text",
-                            text: `Internal Qwen coder draft below. Use it only as a suggestion. Review it carefully. If correct, apply changes using Claude Code tools. If wrong, ignore it.\n\n<QWEN_DRAFT>\n${draftText}\n</QWEN_DRAFT>`
+                            text: `Internal Qwen patch draft below.
+
+Treat this as the primary implementation suggestion.
+Use it unless it is clearly wrong, unsafe, incomplete, or conflicts with the actual file context.
+If it is usable, apply it with Claude Code tools.
+Keep your final response minimal.
+Do not explain broadly.
+Do not rewrite the whole solution if the patch is already sufficient.
+Avoid generating a second long alternative unless Qwen draft is wrong.
+
+<QWEN_DRAFT mode="${qwenDraftMode}" chars="${qwenDraftChars}">
+${draftText}
+</QWEN_DRAFT>`
                         }
                     ]
                 }
@@ -669,6 +717,9 @@ Do not explain broadly.`,
             usefulCodeContext: decision.usefulCodeContext,
             delegate_to_qwen: true,
             qwenDraftUsed,
+            qwenDraftMode,
+            qwenDraftChars,
+            qwenDraftWeak,
             qwenErrorType,
             reducedContextChars,
             qwenLatencyMs,
