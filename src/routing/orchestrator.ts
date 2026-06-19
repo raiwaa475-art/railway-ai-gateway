@@ -232,9 +232,16 @@ interface ParsedQwenPatch {
 interface QwenCodeDraft {
     target_file: string;
     target_symbol: string;
+    anchor_id?: string;
     old_anchor: string;
     change_summary: string;
     new_code: string;
+}
+
+interface AnchorCandidate {
+    id: string;
+    text: string;
+    score: number;
 }
 
 interface ValidatedQwenCodeDraft {
@@ -243,6 +250,8 @@ interface ValidatedQwenCodeDraft {
     reason: string;
     anchorOccurrences?: number;
 }
+
+const MAX_QWEN_DRAFT_CODE_CHARS = 5000;
 
 function normalizeNewlines(str: string): string {
     return str.replace(/\r\n/g, "\n");
@@ -336,11 +345,62 @@ function containsToolUseMarkers(text: string): boolean {
     return t.includes("tool_use") || t.includes("<tool_use") || t.includes("\"name\":\"edit\"") || t.includes("\"name\": \"edit\"");
 }
 
+function buildAnchorCandidates(focusedContext: string, rawFileContent: string, maxCandidates = 20): AnchorCandidate[] {
+    const keywordPattern = /\b(import|export|function|const|let|class|return|if|await|async|router|route|endpoint|handle|validate)\b|app\./i;
+    const strongPattern = /\b(function|export|class|const)\b/i;
+    const weakLines = new Set(["}", ");", "};", "{", "else {"]);
+    const normalizedRaw = normalizeNewlines(rawFileContent);
+
+    const scored = normalizeNewlines(focusedContext)
+        .split("\n")
+        .map((line, index) => {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.length < 8 || weakLines.has(trimmed)) return undefined;
+
+            let score = 0;
+            if (keywordPattern.test(line)) score += 20;
+            if (strongPattern.test(line)) score += 20;
+            if (line.length >= 20 && line.length <= 160) score += 15;
+            if (line.length > 220) score -= 20;
+
+            const occurrences = countOccurrences(normalizedRaw, line);
+            if (occurrences === 1) score += 35;
+            if (occurrences > 1) score -= 20 + occurrences;
+
+            const punctuationChars = (line.match(/[{}()[\];,.:<>+\-*/='"`|&!?\s]/g) || []).length;
+            if (punctuationChars / Math.max(1, line.length) > 0.75) score -= 20;
+
+            return { id: "", text: line, score, index };
+        })
+        .filter((candidate): candidate is AnchorCandidate & { index: number } => !!candidate)
+        .sort((a, b) => b.score - a.score || a.index - b.index)
+        .slice(0, maxCandidates);
+
+    return scored.map((candidate, index) => ({
+        id: `A${String(index + 1).padStart(2, "0")}`,
+        text: candidate.text,
+        score: candidate.score
+    }));
+}
+
+function formatAnchorCandidates(candidates: AnchorCandidate[]): string {
+    return candidates
+        .map(candidate => `${candidate.id}: ${candidate.text.replace(/\r?\n/g, " ")}`)
+        .join("\n");
+}
+
+function resolveAnchorFromCandidateId(anchorId: string | undefined, candidates: AnchorCandidate[]): string {
+    if (!anchorId) return "";
+    const found = candidates.find(candidate => candidate.id === anchorId);
+    return found?.text || "";
+}
+
 function parseQwenCodeDraft(text: string): QwenCodeDraft | undefined {
     const parsed = extractJsonObject(text);
     const draft = {
         target_file: String(parsed?.target_file || ""),
         target_symbol: String(parsed?.target_symbol || ""),
+        anchor_id: parsed?.anchor_id ? String(parsed.anchor_id) : undefined,
         old_anchor: String(parsed?.old_anchor || ""),
         change_summary: String(parsed?.change_summary || ""),
         new_code: String(parsed?.new_code || "")
@@ -352,7 +412,8 @@ function validateQwenCodeDraft(
     text: string,
     targetFile: string,
     rawFileContent: string,
-    focusedContext: string
+    focusedContext: string,
+    anchorCandidates: AnchorCandidate[] = []
 ): ValidatedQwenCodeDraft {
     let draft: QwenCodeDraft | undefined;
     try {
@@ -372,8 +433,11 @@ function validateQwenCodeDraft(
     if (!draft.new_code.trim()) {
         return { ok: false, draft, reason: "qwen_empty_new_code" };
     }
+    if (draft.new_code.length > MAX_QWEN_DRAFT_CODE_CHARS) {
+        return { ok: false, draft, reason: "qwen_large_draft" };
+    }
 
-    const combinedOutput = `${draft.new_code}\n${draft.old_anchor}`;
+    const combinedOutput = `${draft.new_code}\n${draft.old_anchor}\n${draft.anchor_id || ""}`;
     if (containsMarkdownFence(combinedOutput)) {
         return { ok: false, draft, reason: "qwen_markdown_violation" };
     }
@@ -384,7 +448,15 @@ function validateQwenCodeDraft(
         return { ok: false, draft, reason: "qwen_tool_use_violation" };
     }
 
-    const anchor = draft.old_anchor.trim();
+    let anchor = "";
+    if (draft.anchor_id) {
+        anchor = resolveAnchorFromCandidateId(draft.anchor_id, anchorCandidates);
+        if (!anchor) {
+            return { ok: false, draft, reason: "qwen_anchor_id_invalid", anchorOccurrences: 0 };
+        }
+    } else {
+        anchor = draft.old_anchor.trim();
+    }
     if (!anchor) {
         return { ok: false, draft, reason: "qwen_anchor_not_found" };
     }
@@ -792,6 +864,64 @@ function stripLineNumberPrefixes(text: string): string {
     return lines.map(line => line.replace(/^\s*\d+\s*(?:\||:)\s?/, "")).join("\n");
 }
 
+function looksLikeErrorPayload(text: string): boolean {
+    const trimmed = text.trim().toLowerCase();
+    if (!trimmed) return true;
+    return /^error\b/.test(trimmed) ||
+        trimmed.includes("enoent") ||
+        trimmed.includes("no such file") ||
+        trimmed.includes("permission denied") ||
+        trimmed.includes("access is denied") ||
+        trimmed.includes("cannot find") ||
+        trimmed.includes("not found");
+}
+
+function hasTruncationMarker(text: string): boolean {
+    const lowered = text.toLowerCase();
+    return lowered.includes("truncated") ||
+        lowered.includes("omitted") ||
+        lowered.includes("output clipped") ||
+        lowered.includes("content clipped") ||
+        lowered.includes("remaining lines") ||
+        lowered.includes("more lines") ||
+        lowered.includes("...") && /(?:lines?|chars?|tokens?)\s+(?:omitted|truncated|remaining)/i.test(text);
+}
+
+function isRangeOrSearchToolResult(toolName: string, input: any, text: string): boolean {
+    const lowerTool = toolName.toLowerCase();
+    const loweredText = text.toLowerCase();
+    if (/(grep|search|find|rg|select-string|head|tail|sed|range|snippet)/i.test(lowerTool)) {
+        return true;
+    }
+    if (
+        input?.offset !== undefined ||
+        input?.limit !== undefined ||
+        input?.start !== undefined ||
+        input?.end !== undefined ||
+        input?.start_line !== undefined ||
+        input?.end_line !== undefined ||
+        input?.line_start !== undefined ||
+        input?.line_end !== undefined ||
+        input?.pattern !== undefined ||
+        input?.query !== undefined
+    ) {
+        return true;
+    }
+    return loweredText.includes("matches") && loweredText.includes("line") && /\d+[:|]/.test(text);
+}
+
+function isFullFileReadToolResult(toolName: string, input: any, text: string): boolean {
+    const lowerTool = toolName.toLowerCase();
+    const exactToolPattern = /(^|[_\-\s.])(read|view|get|open|cat|show)([_\-\s.]|$)/i;
+    if (!exactToolPattern.test(lowerTool) && !/file.*(content|text)/i.test(lowerTool)) {
+        return false;
+    }
+    if (looksLikeErrorPayload(text) || hasTruncationMarker(text) || isRangeOrSearchToolResult(toolName, input, text)) {
+        return false;
+    }
+    return text.length > 0;
+}
+
 function getFileContentFromToolResults(messages: any[], targetFilePath: string): { content: string; isExact: boolean } {
     if (!targetFilePath) return { content: "", isExact: false };
     const normalizedTarget = normalizePatchPath(targetFilePath);
@@ -814,7 +944,8 @@ function getFileContentFromToolResults(messages: any[], targetFilePath: string):
                     if (toolUseMsg) {
                         const toolUseBlock = toolUseMsg.content.find((b: any) => b?.type === "tool_use" && b.id === toolUseId);
                         toolName = toolUseBlock?.name || "";
-                        const inputPath = toolUseBlock?.input?.AbsolutePath || toolUseBlock?.input?.file_path || toolUseBlock?.input?.path || "";
+                        const input = toolUseBlock?.input || {};
+                        const inputPath = input.AbsolutePath || input.file_path || input.path || "";
                         const normalizedInputPath = typeof inputPath === "string" ? normalizePatchPath(inputPath) : "";
                         if (
                             normalizedInputPath === normalizedTarget ||
@@ -827,10 +958,15 @@ function getFileContentFromToolResults(messages: any[], targetFilePath: string):
 
                 if (isMatch) {
                     let rawText = stripLineNumberPrefixes(unwrapToolResultText(block.content));
-
-                    const lowerTool = toolName.toLowerCase();
-                    const exactToolPattern = /(^|[_\-\s.])(read|view|get|open|cat|show)([_\-\s.]|$)/i;
-                    const isExact = exactToolPattern.test(lowerTool) || /file.*(content|text)/i.test(lowerTool);
+                    const toolUseMsg = toolUseId
+                        ? messages.find(m =>
+                            Array.isArray(m.content) &&
+                            m.content.some((b: any) => b?.type === "tool_use" && b.id === toolUseId)
+                        )
+                        : undefined;
+                    const toolUseBlock = toolUseMsg?.content?.find((b: any) => b?.type === "tool_use" && b.id === toolUseId);
+                    const input = toolUseBlock?.input || {};
+                    const isExact = isFullFileReadToolResult(toolName, input, rawText);
 
                     return { content: rawText, isExact };
                 }
@@ -1644,6 +1780,10 @@ Expected JSON shape:
         const focused = hasExactOriginalFileContent
             ? extractFocusedCodeContext(rawFileContent, userIntent)
             : { context: "", lines: 0, chars: 0, targetSymbol: "unknown" };
+        const anchorCandidates = hasExactOriginalFileContent
+            ? buildAnchorCandidates(focused.context, rawFileContent)
+            : [];
+        const anchorCandidateText = formatAnchorCandidates(anchorCandidates);
 
         const qwenSystemPrompt = `You are a code writer only.
 Write the smallest code block that satisfies the requested change.
@@ -1656,7 +1796,7 @@ Do not output unified diff.
 Do not output FIND/REPLACE.
 Do not output markdown.
 Do not output explanations.
-Return JSON only with target_file, target_symbol, old_anchor, change_summary, new_code.`;
+Return JSON only with target_file, target_symbol, anchor_id, change_summary, new_code.`;
 
         let qwenDraftUsed = false;
         let qwenErrorType: string | undefined = undefined;
@@ -1696,12 +1836,25 @@ Return JSON only with target_file, target_symbol, old_anchor, change_summary, ne
 FOCUSED_CODE_CONTEXT:
 ${focused.context}
 
+ANCHOR_CANDIDATES:
+${anchorCandidateText || "NONE"}
+
 Task: Write a replacement/new code block for this requested change.
 
 Latest user intent preview: ${decision.userIntentPreview}
 
 Return exactly:
-{"target_file":"${targetFile}","target_symbol":"${focused.targetSymbol}","old_anchor":"one exact short line copied from FOCUSED_CODE_CONTEXT","change_summary":"short summary","new_code":"replacement code only"}`
+{"target_file":"${targetFile}","target_symbol":"${focused.targetSymbol}","anchor_id":"A01","change_summary":"short summary","new_code":"replacement code only"}
+
+Rules:
+- Return JSON only.
+- Do not output old_anchor.
+- Do not copy anchor text manually.
+- anchor_id MUST be one of ANCHOR_CANDIDATES.
+- Do not invent anchor_id.
+- If ANCHOR_CANDIDATES is NONE, use anchor_id "".
+- If no candidate is relevant, choose the nearest safe candidate from ANCHOR_CANDIDATES.
+- Do not output markdown, diff, FIND/REPLACE, line numbers, or tool_use.`
                         }
                     ],
                     stream: false,
@@ -1735,15 +1888,31 @@ Return exactly:
                 qwenInputTokens = qwenResult.inputTokens;
                 qwenOutputTokens = qwenResult.outputTokens;
 
-                validatedDraft = validateQwenCodeDraft(draftText, targetFile, rawFileContent, focused.context);
+                validatedDraft = validateQwenCodeDraft(draftText, targetFile, rawFileContent, focused.context, anchorCandidates);
 
-                if (!validatedDraft.ok && validatedDraft.reason === "qwen_json_parse_failed") {
+                const retryableValidationReasons = new Set([
+                    "qwen_json_parse_failed",
+                    "qwen_anchor_not_found",
+                    "qwen_anchor_ambiguous",
+                    "qwen_anchor_id_invalid",
+                    "qwen_file_mismatch"
+                ]);
+
+                if (!validatedDraft.ok && retryableValidationReasons.has(validatedDraft.reason)) {
                     qwenRetryUsed = true;
-                    qwenResult = await callQwen(`Your previous answer was not valid JSON.
+                    qwenResult = await callQwen(`Your previous answer failed gateway validation with reason: ${validatedDraft.reason}.
+ANCHOR_CANDIDATES:
+${anchorCandidateText || "NONE"}
+
 Return one JSON object only.
-No markdown, no explanation, no patch, no line numbers, no FIND/REPLACE, no unified diff.
 Use this exact shape:
-{"target_file":"${targetFile}","target_symbol":"${focused.targetSymbol}","old_anchor":"one exact short line copied from FOCUSED_CODE_CONTEXT","change_summary":"short summary","new_code":"replacement code only"}`);
+{"target_file":"${targetFile}","target_symbol":"${focused.targetSymbol}","anchor_id":"A01","change_summary":"short summary","new_code":"replacement code only"}
+anchor_id MUST be copied from ANCHOR_CANDIDATES exactly.
+Do not output old_anchor.
+Do not output markdown.
+Do not output diff.
+Do not output FIND/REPLACE.
+Do not output tool_use.`);
                     qwenLatencyMs = Date.now() - qwenStartTime;
                     if (qwenResult.ok) {
                         draftText = qwenResult.text;
@@ -1751,7 +1920,7 @@ Use this exact shape:
                         qwenDraftChars = draftText.length;
                         qwenInputTokens += qwenResult.inputTokens;
                         qwenOutputTokens += qwenResult.outputTokens;
-                        validatedDraft = validateQwenCodeDraft(draftText, targetFile, rawFileContent, focused.context);
+                        validatedDraft = validateQwenCodeDraft(draftText, targetFile, rawFileContent, focused.context, anchorCandidates);
                     } else {
                         qwenErrorType = `retry_http_status_${qwenResult.status}`;
                     }
@@ -1810,17 +1979,22 @@ Use this exact shape:
                 ? JSON.stringify({
                     target_file: validatedDraft.draft.target_file,
                     target_symbol: validatedDraft.draft.target_symbol,
+                    anchor_id: validatedDraft.draft.anchor_id,
                     old_anchor: validatedDraft.draft.old_anchor,
                     change_summary: validatedDraft.draft.change_summary,
                     new_code: validatedDraft.draft.new_code
                 }, null, 2)
                 : JSON.stringify({
                     fallbackReason: fallbackReason || qwenPatchReason || "invalid_patch",
-                    qwenPreview: draftText.slice(0, 300)
+                    qwenPreview: draftText.slice(0, 160)
                 }, null, 2);
             const deepseekHybridInstruction = qwenPatchValid
                 ? `Qwen produced a validated code draft. Use it as the primary implementation. Verify against the exact file context. Apply with tools only if safe. Do not rewrite unrelated code. Keep final response short.`
-                : `Qwen code draft was rejected by gateway validation. Use only the fallback reason and short preview below. Do not rely on the full invalid draft. Read or verify exact file context before applying any change. Keep final response short.`;
+                : `Qwen draft failed gateway validation.
+Ignore Qwen implementation content unless independently re-derived from exact tool context.
+Do not use the invalid draft as implementation guidance.
+Proceed with normal tool-controller flow.
+Keep final response short.`;
             const augmentedMessages = [
                 ...req.body.messages,
                 {
@@ -1828,7 +2002,9 @@ Use this exact shape:
                     content: [
                         {
                             type: "text",
-                            text: `You are the planner, verifier, and tool controller.
+                            text: `<GATEWAY_INTERNAL_CONTROLLER_INSTRUCTION>
+This is gateway policy, not a user request.
+You are the planner, verifier, and tool controller.
 Use Qwen code draft if valid.
 Verify against exact file context before applying.
 Make the smallest safe change.
@@ -1842,7 +2018,8 @@ ${deepseekHybridInstruction}
 
 <QWEN_CODE_DRAFT mode="code_draft" valid="${qwenPatchValid}" reason="${fallbackReason || qwenPatchReason}">
 ${draftPayload}
-</QWEN_CODE_DRAFT>`
+</QWEN_CODE_DRAFT>
+</GATEWAY_INTERNAL_CONTROLLER_INSTRUCTION>`
                         }
                     ]
                 }
@@ -1881,6 +2058,8 @@ ${draftPayload}
             qwenAnchorValid: validatedDraft.ok,
             qwenDraftValid: qwenPatchValid,
             qwenValidationReason: fallbackReason || qwenPatchReason,
+            qwenAnchorCandidateCount: anchorCandidates.length,
+            qwenAnchorId: validatedDraft.draft?.anchor_id,
             deepseekApprovalUsed,
             deepseekApprovalApproved,
             reducedContextChars,

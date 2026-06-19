@@ -587,10 +587,30 @@
 
         function isAdvisoryOnly(call) {
             const reason = call.fallback_reason || "";
-            return reason.includes("advisory_only") ||
+            return reason === "skipped_no_exact_context" ||
+                reason === "no_exact_context_advisory_only" ||
+                reason === "tool_result_partial_context_advisory_only" ||
+                reason === "reduced_context_advisory_only" ||
                 reason === "no_workspace_file_on_gateway" ||
-                reason === "file_not_found_on_disk" ||
-                call.direct_edit_eligible === false;
+                reason === "file_not_found_on_disk";
+        }
+
+        function isQwenValidationFailure(call) {
+            const reason = call.fallback_reason || "";
+            return isQwenCall(call) &&
+                call.qwen_patch_valid === false &&
+                [
+                    "qwen_anchor_not_found",
+                    "qwen_anchor_ambiguous",
+                    "qwen_anchor_id_invalid",
+                    "qwen_file_mismatch",
+                    "qwen_format_violation_diff",
+                    "qwen_markdown_violation",
+                    "qwen_tool_use_violation",
+                    "qwen_empty_new_code",
+                    "qwen_json_parse_failed",
+                    "qwen_large_draft"
+                ].includes(reason);
         }
 
         function isLineRangeError(call) {
@@ -606,9 +626,15 @@
 
         function getReasonBadge(reason) {
             if (!reason) return `<span class="cell-muted">-</span>`;
-            if (reason === "file_mismatch") return badge("FILE_MISMATCH", "red");
+            if (reason === "file_mismatch" || reason === "qwen_file_mismatch") return badge("FILE_MISMATCH", "red");
             if (reason === "qwen_anchor_not_found") return badge("ANCHOR_MISSING", "red");
             if (reason === "qwen_anchor_ambiguous") return badge("ANCHOR_AMBIGUOUS", "yellow");
+            if (reason === "qwen_anchor_id_invalid") return badge("ANCHOR_ID_INVALID", "red");
+            if (reason === "qwen_empty_new_code") return badge("EMPTY_CODE", "red");
+            if (reason === "qwen_json_parse_failed") return badge("JSON_FAILED", "red");
+            if (reason === "qwen_large_draft") return badge("LARGE_DRAFT", "yellow");
+            if (reason === "qwen_markdown_violation") return badge("MARKDOWN_REJECTED", "red");
+            if (reason === "qwen_tool_use_violation") return badge("TOOL_USE_REJECTED", "red");
             if (reason === "qwen_format_violation_diff") return badge("DIFF_REJECTED", "red");
             if (reason === "skipped_no_exact_context") return badge("NO_EXACT_CONTEXT", "yellow");
             if (reason === "qwen_code_draft_valid") return badge("DRAFT_VALID", "green");
@@ -621,9 +647,9 @@
 
         function getPatchStatus(call) {
             if (!isQwenCall(call)) return "-";
-            if (call.deepseek_approval_approved === true) return "APPROVED";
             if (call.qwen_patch_valid === true) return "VALID";
             if (isAdvisoryOnly(call)) return "ADVISORY_ONLY";
+            if (isQwenValidationFailure(call)) return "FAILED";
             if (call.qwen_patch_valid === false) return "FAILED";
             return "-";
         }
@@ -647,8 +673,15 @@
             const reason = call.fallback_reason || call.qwen_patch_reason || "";
             if (reason === "file_mismatch") return "Normalize path or force FILE to exact targetFile";
             if (reason === "qwen_code_draft_valid") return "Qwen wrote code draft; DeepSeek verifies/applies";
-            if (reason === "qwen_anchor_not_found") return "Anchor missing; improve context extraction";
-            if (reason === "qwen_anchor_ambiguous") return "Anchor ambiguous; need more focused context";
+            if (reason === "qwen_anchor_not_found") return "Anchor missing; use anchor_id candidates";
+            if (reason === "qwen_anchor_ambiguous") return "Anchor ambiguous; prefer unique anchor candidate";
+            if (reason === "qwen_anchor_id_invalid") return "Qwen chose invalid anchor_id; use ANCHOR_CANDIDATES only";
+            if (reason === "qwen_file_mismatch") return "Qwen target_file mismatch; force exact target_file";
+            if (reason === "qwen_json_parse_failed") return "Qwen returned invalid JSON; retry JSON-only";
+            if (reason === "qwen_large_draft") return "Qwen new_code too large; reject to protect DeepSeek tokens";
+            if (reason === "qwen_empty_new_code") return "Qwen returned empty new_code";
+            if (reason === "qwen_markdown_violation") return "Qwen returned markdown; reject and retry JSON-only";
+            if (reason === "qwen_tool_use_violation") return "Qwen tried tool_use; keep Qwen as code writer only";
             if (reason === "qwen_format_violation_diff") return "Qwen returned diff; rejected and fallback short";
             if (reason === "skipped_no_exact_context") return "Read exact file before Qwen";
             if (reason === "no_exact_context_advisory_only") return "No exact context; Qwen advisory only";
@@ -701,8 +734,8 @@
             if (filter === "all") return true;
             if (filter === "qwen_failed") return isQwenCall(call) && call.qwen_patch_valid === false;
             if (filter === "advisory_only") return isQwenCall(call) && isAdvisoryOnly(call);
-            if (filter === "file_mismatch") return isQwenCall(call) && call.fallback_reason === "file_mismatch";
-            if (filter === "draft_context_error") return isQwenCall(call) && ["qwen_anchor_not_found", "qwen_anchor_ambiguous", "skipped_no_exact_context"].includes(call.fallback_reason || "");
+            if (filter === "file_mismatch") return isQwenCall(call) && ["file_mismatch", "qwen_file_mismatch"].includes(call.fallback_reason || "");
+            if (filter === "draft_context_error") return isQwenCall(call) && ["qwen_anchor_not_found", "qwen_anchor_ambiguous", "qwen_anchor_id_invalid", "skipped_no_exact_context"].includes(call.fallback_reason || "");
             if (filter === "deepseek_fallback") {
                 const fallbackRequestIds = new Set(currentRecentCalls
                     .filter(row => isQwenCall(row) && (row.qwen_patch_valid === false || (row.fallback_reason && !row.deepseek_approval_approved)))
