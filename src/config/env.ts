@@ -36,5 +36,8 @@ export const config = {
     usdThbRate: Number(process.env.USD_THB_RATE || 35.0),
     deepseekInputCacheHitUsdPer1M: Number(process.env.DEEPSEEK_INPUT_CACHE_HIT_USD_PER_1M || 0.07),
     deepseekInputCacheMissUsdPer1M: Number(process.env.DEEPSEEK_INPUT_CACHE_MISS_USD_PER_1M || 0.27),
-    deepseekOutputUsdPer1M: Number(process.env.DEEPSEEK_OUTPUT_USD_PER_1M || 1.10)
+    deepseekOutputUsdPer1M: Number(process.env.DEEPSEEK_OUTPUT_USD_PER_1M || 1.10),
+    gatewayAdminKey: process.env.GATEWAY_ADMIN_KEY || "",
+    allowPrivateProviderUrl: process.env.ALLOW_PRIVATE_PROVIDER_URL === "true",
+    defaultProviderId: process.env.DEFAULT_PROVIDER_ID || ""
 };

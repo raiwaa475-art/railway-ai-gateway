@@ -1,13 +1,297 @@
 import { Router } from "express";
 import crypto from "crypto";
+import path from "path";
 import { authMiddleware } from "../auth.js";
 import { sanitizeAnthropicResponse } from "../providers/deepseek.js";
 import { SUPPORTED_MODELS } from "../config/models.js";
 import { ModelRouter } from "../routing/router.js";
 import { OrchestratorService } from "../routing/orchestrator.js";
 import { insertGatewayRequest, updateGatewayRequest, insertModelCall, pool } from "../utils/db.js";
+import { config } from "../config/env.js";
+import { ProviderStore } from "../utils/provider-store.js";
+import { ProviderService } from "../utils/provider-service.js";
+import { createOpenAiToAnthropicStream } from "../utils/stream-handler.js";
 
 export const gatewayRouter = Router();
+
+function adminAuthMiddleware(req: any, res: any, next: any) {
+    const expectedKey = config.gatewayAdminKey || config.gatewayApiKey;
+
+    if (!expectedKey) {
+        return res.status(500).json({
+            error: {
+                type: "server_error",
+                message: "GATEWAY_ADMIN_KEY or GATEWAY_API_KEY is not configured"
+            }
+        });
+    }
+
+    const auth = req.header("authorization") || req.header("x-api-key") || "";
+    const token = auth.replace(/^Bearer\s+/i, "").trim();
+
+    if (token !== expectedKey) {
+        return res.status(401).json({
+            error: {
+                type: "authentication_error",
+                message: "Invalid admin key"
+            }
+        });
+    }
+
+    next();
+}
+
+async function handleConfigurableProviderRequest(
+    provider: any,
+    modelName: string,
+    body: any,
+    headers: Record<string, string>,
+    req: any,
+    res: any,
+    requestId: string
+): Promise<boolean> {
+    const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
+    let openaiTools: any[] | undefined = undefined;
+    if (hasTools) {
+        openaiTools = body.tools.map((t: any) => ({
+            type: "function",
+            function: {
+                name: t.name,
+                description: t.description,
+                parameters: t.input_schema
+            }
+        }));
+    }
+
+    const openaiMessages: any[] = [];
+    if (body.system) {
+        openaiMessages.push({
+            role: "system",
+            content: body.system
+        });
+    }
+
+    if (Array.isArray(body.messages)) {
+        for (const msg of body.messages) {
+            if (typeof msg.content === "string") {
+                openaiMessages.push({
+                    role: msg.role,
+                    content: msg.content
+                });
+            } else if (Array.isArray(msg.content)) {
+                if (msg.role === "assistant") {
+                    let textContent = "";
+                    const toolCalls: any[] = [];
+                    for (const block of msg.content) {
+                        if (block?.type === "text") {
+                            textContent += block.text;
+                        } else if (block?.type === "tool_use") {
+                            toolCalls.push({
+                                id: block.id,
+                                type: "function",
+                                function: {
+                                    name: block.name,
+                                    arguments: typeof block.input === "string" ? block.input : JSON.stringify(block.input)
+                                }
+                            });
+                        }
+                    }
+                    const openAiMsg: any = { role: "assistant" };
+                    if (textContent) {
+                        openAiMsg.content = textContent;
+                    } else {
+                        openAiMsg.content = null;
+                    }
+                    if (toolCalls.length > 0) {
+                        openAiMsg.tool_calls = toolCalls;
+                    }
+                    openaiMessages.push(openAiMsg);
+                } else if (msg.role === "user") {
+                    const toolResultBlocks = msg.content.filter((b: any) => b?.type === "tool_result");
+                    const textBlocks = msg.content.filter((b: any) => b?.type === "text");
+
+                    for (const block of toolResultBlocks) {
+                        let resContent = "";
+                        if (typeof block.content === "string") {
+                            resContent = block.content;
+                        } else if (Array.isArray(block.content)) {
+                            resContent = block.content.map((cb: any) => cb?.text || "").join("");
+                        } else if (block.content !== undefined) {
+                            resContent = JSON.stringify(block.content);
+                        }
+                        openaiMessages.push({
+                            role: "tool",
+                            tool_call_id: block.tool_use_id,
+                            content: resContent
+                        });
+                    }
+
+                    if (textBlocks.length > 0) {
+                        openaiMessages.push({
+                            role: "user",
+                            content: textBlocks.map((b: any) => b.text || "").join("")
+                        });
+                    }
+                } else {
+                    openaiMessages.push({
+                        role: msg.role,
+                        content: msg.content.map((b: any) => b.text || "").join("")
+                    });
+                }
+            }
+        }
+    }
+
+    const isStream = !!body.stream && provider.streamEnabled;
+
+    const openAiBody: any = {
+        model: modelName,
+        messages: openaiMessages,
+        temperature: body.temperature ?? 0.7,
+        max_tokens: body.max_tokens ?? 2048,
+        stream: isStream
+    };
+
+    if (hasTools) {
+        openAiBody.tools = openaiTools;
+        openAiBody.tool_choice = "auto";
+    }
+
+    const timeoutMs = Math.min(Math.max(provider.timeoutMs || 120000, 1000), 300000);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+        const url = `${provider.openaiBaseUrl}/chat/completions`;
+        const authHeader = provider.type === "ollama" ? "Bearer ollama" : `Bearer ${provider.apiKey || ""}`;
+        
+        const response = await fetch(url, {
+            method: "POST",
+            headers: {
+                "content-type": "application/json",
+                "authorization": authHeader
+            },
+            body: JSON.stringify(openAiBody),
+            signal: controller.signal
+        });
+
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            let errorText = "";
+            try {
+                errorText = await response.text();
+            } catch {}
+            
+            res.status(503).json({
+                error: {
+                    type: "api_error",
+                    message: `Local AI provider returned error status ${response.status}: ${errorText.slice(0, 150)}`
+                }
+            });
+            return true;
+        }
+
+        if (isStream && response.body) {
+            res.setHeader("content-type", "text/event-stream");
+            res.setHeader("cache-control", "no-cache");
+            res.setHeader("x-accel-buffering", "no");
+            res.setHeader("connection", "keep-alive");
+
+            const transformedStream = createOpenAiToAnthropicStream(response.body);
+            const reader = transformedStream.getReader();
+            const decoder = new TextDecoder();
+            
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                res.write(value);
+            }
+            res.end();
+            return true;
+        }
+
+        const openAiData = await response.json();
+        const message = openAiData.choices?.[0]?.message;
+        const textContent = message?.content || "";
+
+        const contentBlocks: any[] = [];
+        if (textContent) {
+            contentBlocks.push({
+                type: "text",
+                text: textContent
+            });
+        }
+
+        let stopReason = "end_turn";
+        if (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) {
+            stopReason = "tool_use";
+            for (const call of message.tool_calls) {
+                let parsedInput = {};
+                try {
+                    parsedInput = typeof call.function.arguments === "string"
+                        ? JSON.parse(call.function.arguments)
+                        : call.function.arguments;
+                } catch {
+                    parsedInput = call.function.arguments;
+                }
+                contentBlocks.push({
+                    type: "tool_use",
+                    id: call.id,
+                    name: call.function.name,
+                    input: parsedInput
+                });
+            }
+        }
+
+        const messageId = "msg_local_" + Math.random().toString(36).substring(7);
+        const anthropicResponse = {
+            id: messageId,
+            type: "message",
+            role: "assistant",
+            content: contentBlocks.length > 0 ? contentBlocks : [{ type: "text", text: "" }],
+            model: modelName,
+            stop_reason: stopReason,
+            stop_sequence: null,
+            usage: {
+                input_tokens: openAiData.usage?.prompt_tokens || 0,
+                output_tokens: openAiData.usage?.completion_tokens || 0
+            }
+        };
+
+        await insertModelCall({
+            requestId,
+            provider: provider.type,
+            model: modelName,
+            inputTokens: openAiData.usage?.prompt_tokens || 0,
+            outputTokens: openAiData.usage?.completion_tokens || 0,
+            latencyMs: 0
+        });
+
+        res.json(anthropicResponse);
+        return true;
+
+    } catch (error: any) {
+        clearTimeout(timeoutId);
+        const isTimeout = error.name === "AbortError";
+        let message = "Local AI is currently offline";
+        if (isTimeout) {
+            message = `Request timed out (timeout: ${timeoutMs}ms)`;
+        } else if (error.code === "ECONNREFUSED" || error.message?.includes("fetch failed")) {
+            message = `Connection refused: Check if tunnel is offline or Ollama/LM Studio is not running`;
+        } else {
+            message = error.message || message;
+        }
+
+        res.status(503).json({
+            error: {
+                type: "api_error",
+                message
+            }
+        });
+        return true;
+    }
+}
 
 function logRequest(info: Record<string, unknown>) {
     console.log(JSON.stringify({
@@ -34,16 +318,49 @@ gatewayRouter.get("/health", (_req, res) => {
     });
 });
 
-gatewayRouter.get("/v1/models", authMiddleware, (_req, res) => {
-    res.json({
-        data: SUPPORTED_MODELS.map(m => ({
+gatewayRouter.get("/v1/models", authMiddleware, async (_req, res) => {
+    try {
+        const dynamicModelsGrouped = await ProviderStore.getModelsGroupedByProvider();
+        const allProviders = await ProviderStore.getAllProviders();
+        
+        const dynamicModelsList: any[] = [];
+        for (const [providerName, models] of Object.entries(dynamicModelsGrouped)) {
+            const provider = allProviders.find(p => p.name === providerName);
+            if (provider && provider.enabled) {
+                for (const m of models) {
+                    dynamicModelsList.push({
+                        id: `${provider.id}/${m.name}`,
+                        type: "model",
+                        display_name: `${m.name} (${provider.name})`,
+                        provider: provider.type,
+                        gateway_role: "configurable-provider"
+                    });
+                }
+            }
+        }
+
+        const staticModels = SUPPORTED_MODELS.map(m => ({
             id: m.id,
             type: "model",
             display_name: m.displayName,
             provider: m.providerId,
             gateway_role: m.providerId === "deepseek" ? "default" : "local-dev"
-        }))
-    });
+        }));
+
+        res.json({
+            data: [...staticModels, ...dynamicModelsList]
+        });
+    } catch (err: any) {
+        res.json({
+            data: SUPPORTED_MODELS.map(m => ({
+                id: m.id,
+                type: "model",
+                display_name: m.displayName,
+                provider: m.providerId,
+                gateway_role: m.providerId === "deepseek" ? "default" : "local-dev"
+            }))
+        });
+    }
 });
 
 gatewayRouter.post("/v1/messages", authMiddleware, async (req, res) => {
@@ -55,6 +372,119 @@ gatewayRouter.post("/v1/messages", authMiddleware, async (req, res) => {
 
     // Insert gateway request to DB
     await insertGatewayRequest(requestId, clientModel, mode, isStream);
+
+    try {
+        const allProviders = await ProviderStore.getAllProviders();
+        const enabledProviders = allProviders.filter(p => p.enabled);
+        const modelsGrouped = await ProviderStore.getModelsGroupedByProvider();
+
+        let matchedProvider: any = null;
+        let matchedModelName = "";
+
+        const slashIndex = clientModel.indexOf("/");
+        if (slashIndex !== -1) {
+            const providerRef = clientModel.substring(0, slashIndex).trim();
+            const modelRef = clientModel.substring(slashIndex + 1).trim();
+
+            matchedProvider = enabledProviders.find(p => 
+                p.id.toString() === providerRef || 
+                p.name.toLowerCase() === providerRef.toLowerCase() ||
+                p.type.toLowerCase() === providerRef.toLowerCase()
+            );
+            if (matchedProvider) {
+                matchedModelName = modelRef;
+            }
+        }
+
+        if (!matchedProvider) {
+            for (const [providerName, modelList] of Object.entries(modelsGrouped)) {
+                const providerObj = enabledProviders.find(p => p.name === providerName);
+                if (providerObj) {
+                    const modelObj = modelList.find(m => m.name.toLowerCase() === clientModel.toLowerCase());
+                    if (modelObj) {
+                        matchedProvider = providerObj;
+                        matchedModelName = modelObj.name;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!matchedProvider && (clientModel === "unknown" || clientModel === "" || clientModel === "default")) {
+            const defaultProvider = enabledProviders.find(p => p.defaultModel);
+            if (defaultProvider && defaultProvider.defaultModel) {
+                matchedProvider = defaultProvider;
+                matchedModelName = defaultProvider.defaultModel;
+            }
+        }
+
+        if (matchedProvider && matchedModelName) {
+            logRequest({
+                type: "request",
+                requestId,
+                method: req.method,
+                path: req.path,
+                clientModel,
+                upstreamModel: matchedModelName,
+                stream: isStream,
+                provider: matchedProvider.name
+            });
+
+            try {
+                const clientHeaders = { "user-agent": req.header("user-agent") || "railway-ai-gateway" };
+                const handled = await handleConfigurableProviderRequest(
+                    matchedProvider,
+                    matchedModelName,
+                    req.body,
+                    clientHeaders,
+                    req,
+                    res,
+                    requestId
+                );
+                if (handled) {
+                    const totalLatencyMs = Date.now() - startTime;
+                    await updateGatewayRequest(requestId, 200, totalLatencyMs);
+                    logRequest({
+                        type: "response",
+                        requestId,
+                        method: req.method,
+                        path: req.path,
+                        clientModel,
+                        upstreamModel: matchedModelName,
+                        status: 200,
+                        latencyMs: totalLatencyMs,
+                        stream: isStream,
+                        provider: matchedProvider.name
+                    });
+                    return;
+                }
+            } catch (err: any) {
+                const totalLatencyMs = Date.now() - startTime;
+                await updateGatewayRequest(requestId, 500, totalLatencyMs);
+                logRequest({
+                    type: "response",
+                    requestId,
+                    method: req.method,
+                    path: req.path,
+                    clientModel,
+                    upstreamModel: matchedModelName,
+                    status: 500,
+                    latencyMs: totalLatencyMs,
+                    stream: isStream,
+                    errorMessage: err.message,
+                    provider: matchedProvider.name
+                });
+                return res.status(500).json({
+                    error: {
+                        type: "gateway_error",
+                        message: err.message || "Failed to process request via local provider"
+                    }
+                });
+            }
+        }
+    } catch (e: any) {
+        console.error("Configurable provider routing error:", e);
+    }
 
     if (clientModel === "hybrid-flow" || clientModel === "qwen-smart") {
         logRequest({
@@ -453,5 +883,110 @@ gatewayRouter.post("/admin/usage/clear", authMiddleware, async (req, res) => {
         res.json({ ok: true });
     } catch (err: any) {
         res.status(500).json({ ok: false, error: err.message });
+    }
+});
+
+// Admin Providers page serving
+gatewayRouter.get("/admin/ai-providers", (req, res) => {
+    res.sendFile(path.join(process.cwd(), "public", "ai-providers.html"));
+});
+
+// Admin Providers API Endpoints
+gatewayRouter.get("/api/admin/ai-providers", adminAuthMiddleware, async (req, res) => {
+    try {
+        const list = await ProviderStore.getAllProviders();
+        const sanitized = list.map(p => ({
+            ...p,
+            apiKey: p.apiKey ? "***" : ""
+        }));
+        res.json(sanitized);
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+gatewayRouter.post("/api/admin/ai-providers", adminAuthMiddleware, async (req, res) => {
+    try {
+        const data = req.body;
+        if (data.id) {
+            const existing = await ProviderStore.getProviderById(Number(data.id));
+            if (existing && data.apiKey === "***") {
+                data.apiKey = existing.apiKey;
+            }
+        }
+        const saved = await ProviderStore.saveProvider(data);
+        res.json({
+            ...saved,
+            apiKey: saved.apiKey ? "***" : ""
+        });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+gatewayRouter.delete("/api/admin/ai-providers/:id", adminAuthMiddleware, async (req, res) => {
+    try {
+        const ok = await ProviderStore.deleteProvider(Number(req.params.id));
+        res.json({ ok });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+gatewayRouter.post("/api/admin/ai-providers/test", adminAuthMiddleware, async (req, res) => {
+    try {
+        const { type, serverUrl, apiKey } = req.body;
+        const result = await ProviderService.testConnection({ type, serverUrl, apiKey });
+        res.json(result);
+    } catch (err: any) {
+        res.status(500).json({ ok: false, message: err.message });
+    }
+});
+
+gatewayRouter.post("/api/admin/ai-providers/:id/sync-models", adminAuthMiddleware, async (req, res) => {
+    try {
+        const provider = await ProviderStore.getProviderById(Number(req.params.id));
+        if (!provider) {
+            return res.status(404).json({ error: "Provider not found" });
+        }
+        const fetched = await ProviderService.fetchModels(provider);
+        const saved = await ProviderStore.syncModels(provider.id, fetched);
+        res.json(saved);
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+gatewayRouter.post("/api/admin/ai-providers/:id/pull-model", adminAuthMiddleware, async (req, res) => {
+    try {
+        const provider = await ProviderStore.getProviderById(Number(req.params.id));
+        if (!provider) {
+            return res.status(404).json({ error: "Provider not found" });
+        }
+        const { model } = req.body;
+        const result = await ProviderService.pullModel(provider, model);
+        res.json(result);
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+gatewayRouter.post("/api/admin/ai-providers/:id/default-model", adminAuthMiddleware, async (req, res) => {
+    try {
+        const providerId = Number(req.params.id);
+        const { model } = req.body;
+        const ok = await ProviderStore.setDefaultModel(providerId, model);
+        res.json({ ok });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+gatewayRouter.get("/api/admin/ai-models", adminAuthMiddleware, async (req, res) => {
+    try {
+        const grouped = await ProviderStore.getModelsGroupedByProvider();
+        res.json(grouped);
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
     }
 });

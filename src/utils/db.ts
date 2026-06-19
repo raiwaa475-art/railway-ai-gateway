@@ -66,6 +66,36 @@ export async function initDb() {
             );
         `);
 
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS ai_providers (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                type VARCHAR(50) NOT NULL,
+                server_url VARCHAR(500) NOT NULL,
+                openai_base_url VARCHAR(500),
+                native_base_url VARCHAR(500),
+                api_key VARCHAR(500),
+                default_model VARCHAR(255),
+                enabled BOOLEAN DEFAULT true,
+                timeout_ms INTEGER DEFAULT 120000,
+                stream_enabled BOOLEAN DEFAULT false,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS ai_models (
+                id SERIAL PRIMARY KEY,
+                provider_id INTEGER REFERENCES ai_providers(id) ON DELETE CASCADE,
+                name VARCHAR(255) NOT NULL,
+                size BIGINT,
+                modified_at TIMESTAMP,
+                raw_metadata JSONB,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
         // Safely add columns to existing tables
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS input_cost_usd NUMERIC(12, 6) DEFAULT 0;`);
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS input_cost_thb NUMERIC(12, 6) DEFAULT 0;`);

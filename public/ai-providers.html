@@ -1,0 +1,896 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Providers - Railway AI Gateway</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --card-bg: rgba(20, 26, 46, 0.6);
+            --card-border: rgba(255, 255, 255, 0.08);
+            --accent-color: #3b82f6;
+            --accent-glow: rgba(59, 130, 246, 0.35);
+            --success-color: #10b981;
+            --success-glow: rgba(16, 185, 129, 0.3);
+            --danger-color: #ef4444;
+            --danger-glow: rgba(239, 68, 68, 0.3);
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-start;
+            padding: 2rem 1rem;
+            overflow-x: hidden;
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(59, 130, 246, 0.1) 0px, transparent 50%),
+                radial-gradient(at 100% 100%, rgba(16, 185, 129, 0.05) 0px, transparent 50%);
+        }
+
+        header {
+            width: 100%;
+            max-width: 1200px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--card-border);
+        }
+
+        h1 {
+            font-size: 1.8rem;
+            font-weight: 600;
+            background: linear-gradient(135deg, #fff 30%, #a5b4fc 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        select, button, input {
+            background-color: rgba(17, 24, 39, 0.8);
+            border: 1px solid var(--card-border);
+            color: var(--text-main);
+            padding: 0.6rem 1.2rem;
+            border-radius: 8px;
+            font-family: inherit;
+            font-size: 0.9rem;
+            outline: none;
+            transition: all 0.2s ease-in-out;
+        }
+
+        select:hover, button:hover {
+            border-color: var(--accent-color);
+            cursor: pointer;
+        }
+
+        button.primary {
+            background-color: var(--accent-color);
+            border-color: var(--accent-color);
+            font-weight: 500;
+        }
+
+        button.primary:hover {
+            box-shadow: 0 0 15px var(--accent-glow);
+            transform: translateY(-1px);
+        }
+
+        button.danger {
+            background-color: rgba(239, 68, 68, 0.15);
+            border-color: rgba(239, 68, 68, 0.3);
+            color: #f87171;
+        }
+
+        button.danger:hover {
+            background-color: var(--danger-color);
+            border-color: var(--danger-color);
+            color: #fff;
+            box-shadow: 0 0 15px var(--danger-glow);
+        }
+
+        .grid-layout {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+            width: 100%;
+            max-width: 1200px;
+        }
+
+        @media (max-width: 900px) {
+            .grid-layout {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .card {
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            padding: 1.8rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1.2rem;
+        }
+
+        .card-title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: #fff;
+            border-bottom: 1px solid var(--card-border);
+            padding-bottom: 0.8rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+        }
+
+        .form-group label {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+        }
+
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            margin-top: 0.5rem;
+        }
+
+        .checkbox-group input {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+
+        .status-msg {
+            padding: 0.8rem;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            display: none;
+        }
+
+        .status-msg.success {
+            background-color: rgba(16, 185, 129, 0.15);
+            border: 1px solid rgba(16, 185, 129, 0.3);
+            color: #34d399;
+            display: block;
+        }
+
+        .status-msg.error {
+            background-color: rgba(239, 68, 68, 0.15);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            color: #f87171;
+            display: block;
+        }
+
+        .provider-list {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .provider-item {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--card-border);
+            border-radius: 10px;
+            padding: 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: all 0.2s ease-in-out;
+        }
+
+        .provider-item:hover {
+            border-color: rgba(255, 255, 255, 0.15);
+        }
+
+        .provider-info {
+            display: flex;
+            flex-direction: column;
+            gap: 0.3rem;
+        }
+
+        .provider-name-tag {
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .badge {
+            font-size: 0.7rem;
+            padding: 0.15rem 0.4rem;
+            border-radius: 4px;
+            text-transform: uppercase;
+            font-weight: bold;
+        }
+
+        .badge.enabled { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+        .badge.disabled { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+        .badge.type { background: rgba(59, 130, 246, 0.2); color: #60a5fa; }
+
+        .provider-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .models-section {
+            width: 100%;
+            max-width: 1200px;
+            margin-top: 2rem;
+        }
+
+        .table-wrapper {
+            width: 100%;
+            overflow-x: auto;
+            margin-top: 1rem;
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 0.9rem;
+            background: var(--card-bg);
+        }
+
+        th, td {
+            padding: 1rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        th {
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        tr:hover td {
+            background-color: rgba(255, 255, 255, 0.02);
+        }
+
+        .auth-container {
+            width: 100%;
+            max-width: 420px;
+            margin-top: 10vh;
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--card-border);
+            border-radius: 20px;
+            padding: 2.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.4);
+        }
+
+        .auth-container h2 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            text-align: center;
+        }
+
+        .auth-container input {
+            width: 100%;
+            padding: 0.8rem 1rem;
+        }
+
+        .auth-container button {
+            width: 100%;
+            padding: 0.8rem;
+        }
+
+        .loading-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(11, 15, 25, 0.85);
+            backdrop-filter: blur(5px);
+            z-index: 100;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2rem;
+            font-weight: 500;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .spinner {
+            border: 4px solid rgba(255,255,255,0.1);
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            border-left-color: var(--accent-color);
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="spinner"></div>
+        <div id="loadingText">Loading...</div>
+    </div>
+
+    <!-- Admin Key Auth -->
+    <div class="auth-container" id="authContainer">
+        <h2>Admin Authentication</h2>
+        <input type="password" id="adminKeyInput" placeholder="GATEWAY_ADMIN_KEY or API Key">
+        <div class="status-msg error" id="authError" style="display:none;">Invalid credentials. Please try again.</div>
+        <button class="primary" onclick="login()">Authenticate</button>
+    </div>
+
+    <!-- Main Layout -->
+    <div class="dashboard-container" id="dashboardContainer" style="display:none; width:100%; max-width:1200px;">
+        <header>
+            <h1>AI Providers Configuration</h1>
+            <div class="controls">
+                <button class="primary" onclick="location.href='/dashboard/'">Dashboard Stats</button>
+                <button onclick="logout()">Logout</button>
+            </div>
+        </header>
+
+        <div class="grid-layout">
+            <!-- Left: Add/Edit Config -->
+            <div class="card">
+                <div class="card-title" id="formTitle">Add AI Provider</div>
+                <input type="hidden" id="providerId">
+
+                <div class="form-group">
+                    <label>Provider Type</label>
+                    <select id="providerType" onchange="onProviderTypeChange()">
+                        <option value="ollama">Ollama</option>
+                        <option value="lmstudio">LM Studio</option>
+                        <option value="openai_compatible">OpenAI Compatible</option>
+                        <option value="deepseek">DeepSeek (Upstream)</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label>Provider Name</label>
+                    <input type="text" id="providerName" placeholder="e.g. Local Ollama">
+                </div>
+
+                <div class="form-group">
+                    <label>Server URL</label>
+                    <input type="text" id="serverUrl" placeholder="https://xxxxx.trycloudflare.com or http://localhost:11434">
+                </div>
+
+                <div class="form-group">
+                    <label>API Key (Optional)</label>
+                    <input type="password" id="apiKey" placeholder="apiKey if needed">
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Timeout (ms)</label>
+                        <input type="number" id="timeoutMs" value="120000" min="1000" max="300000">
+                    </div>
+                    <div class="form-group">
+                        <label>Default Model</label>
+                        <select id="defaultModelSelect">
+                            <option value="">(No models synced yet)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="checkbox-group">
+                    <input type="checkbox" id="streamEnabled">
+                    <label for="streamEnabled">Enable Stream (Recommended Off for Quick Tunnels)</label>
+                </div>
+
+                <div class="checkbox-group">
+                    <input type="checkbox" id="providerEnabled" checked>
+                    <label for="providerEnabled">Provider Enabled</label>
+                </div>
+
+                <div class="status-msg" id="formStatus"></div>
+
+                <div class="controls" style="justify-content: flex-end; width:100%; margin-top:1rem;">
+                    <button class="primary" onclick="saveProvider()">Save Provider</button>
+                    <button onclick="testConnection()">Test Connection</button>
+                    <button onclick="resetForm()">Clear Form</button>
+                </div>
+            </div>
+
+            <!-- Right: Configured Providers -->
+            <div class="card">
+                <div class="card-title">Configured Providers</div>
+                <div class="provider-list" id="providersList">
+                    <!-- Providers list loaded dynamically -->
+                </div>
+
+                <!-- Ollama Pull Model Section -->
+                <div id="ollamaPullSection" style="display:none; border-top:1px solid var(--card-border); padding-top:1.5rem; margin-top:1rem; display:flex; flex-direction:column; gap:1rem;">
+                    <div style="font-weight: 600;">Ollama: Pull Model</div>
+                    <div class="form-group">
+                        <label>Model Name</label>
+                        <input type="text" id="pullModelName" placeholder="e.g. qwen2.5-coder:7b">
+                    </div>
+                    <button class="primary" onclick="pullModel()" style="width:fit-content; align-self:flex-end;">Pull Model</button>
+                    <div class="status-msg" id="pullStatus"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Dynamic Synced Models List -->
+        <div class="card models-section">
+            <div class="card-title">Synced Models</div>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Provider</th>
+                            <th>Model Name</th>
+                            <th>Size</th>
+                            <th>Sync Date</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="modelsTableBody">
+                        <tr>
+                            <td colspan="5" style="text-align: center; color: var(--text-muted);">No models synced yet.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const authContainer = document.getElementById("authContainer");
+        const dashboardContainer = document.getElementById("dashboardContainer");
+        const adminKeyInput = document.getElementById("adminKeyInput");
+        const authError = document.getElementById("authError");
+        const loadingOverlay = document.getElementById("loadingOverlay");
+        const loadingText = document.getElementById("loadingText");
+
+        window.addEventListener("DOMContentLoaded", () => {
+            const savedKey = localStorage.getItem("gateway_admin_key") || localStorage.getItem("gateway_api_key");
+            if (savedKey) {
+                showDashboard();
+            } else {
+                showAuth();
+            }
+        });
+
+        function showAuth() {
+            authContainer.style.display = "flex";
+            dashboardContainer.style.display = "none";
+        }
+
+        function showDashboard() {
+            authContainer.style.display = "none";
+            dashboardContainer.style.display = "block";
+            loadProviders();
+            loadModels();
+        }
+
+        function login() {
+            const key = adminKeyInput.value.trim();
+            if (!key) return;
+            localStorage.setItem("gateway_admin_key", key);
+            showDashboard();
+        }
+
+        function logout() {
+            localStorage.removeItem("gateway_admin_key");
+            adminKeyInput.value = "";
+            showAuth();
+        }
+
+        function showLoading(text) {
+            loadingText.innerText = text;
+            loadingOverlay.style.display = "flex";
+        }
+
+        function hideLoading() {
+            loadingOverlay.style.display = "none";
+        }
+
+        function onProviderTypeChange() {
+            const type = document.getElementById("providerType").value;
+            const pullSection = document.getElementById("ollamaPullSection");
+            if (type === "ollama") {
+                pullSection.style.display = "flex";
+            } else {
+                pullSection.style.display = "none";
+            }
+        }
+
+        function getAuthHeader() {
+            const key = localStorage.getItem("gateway_admin_key");
+            return { "Authorization": `Bearer ${key}` };
+        }
+
+        function showFormStatus(msg, isError) {
+            const status = document.getElementById("formStatus");
+            status.innerText = msg;
+            status.className = "status-msg " + (isError ? "error" : "success");
+        }
+
+        function resetForm() {
+            document.getElementById("providerId").value = "";
+            document.getElementById("providerName").value = "";
+            document.getElementById("serverUrl").value = "";
+            document.getElementById("apiKey").value = "";
+            document.getElementById("timeoutMs").value = "120000";
+            document.getElementById("streamEnabled").checked = false;
+            document.getElementById("providerEnabled").checked = true;
+            document.getElementById("formTitle").innerText = "Add AI Provider";
+            document.getElementById("formStatus").style.display = "none";
+            document.getElementById("defaultModelSelect").innerHTML = '<option value="">(No models synced yet)</option>';
+        }
+
+        async function testConnection() {
+            const type = document.getElementById("providerType").value;
+            const serverUrl = document.getElementById("serverUrl").value.trim();
+            const apiKey = document.getElementById("apiKey").value.trim();
+
+            if (!serverUrl) {
+                showFormStatus("Server URL is required", true);
+                return;
+            }
+
+            showLoading("Testing connection...");
+            try {
+                const res = await fetch("/api/admin/ai-providers/test", {
+                    method: "POST",
+                    headers: {
+                        "content-type": "application/json",
+                        ...getAuthHeader()
+                    },
+                    body: JSON.stringify({ type, serverUrl, apiKey })
+                });
+                
+                const data = await res.json();
+                if (data.ok) {
+                    showFormStatus("Connection test successful!", false);
+                } else {
+                    showFormStatus("Connection failed: " + data.message, true);
+                }
+            } catch (err) {
+                showFormStatus("Test connection failed: " + err.message, true);
+            } finally {
+                hideLoading();
+            }
+        }
+
+        async function saveProvider() {
+            const id = document.getElementById("providerId").value;
+            const name = document.getElementById("providerName").value.trim();
+            const type = document.getElementById("providerType").value;
+            const serverUrl = document.getElementById("serverUrl").value.trim();
+            const apiKey = document.getElementById("apiKey").value.trim();
+            const timeoutMs = parseInt(document.getElementById("timeoutMs").value) || 120000;
+            const streamEnabled = document.getElementById("streamEnabled").checked;
+            const enabled = document.getElementById("providerEnabled").checked;
+            const defaultModel = document.getElementById("defaultModelSelect").value;
+
+            if (!name || !serverUrl) {
+                showFormStatus("Name and Server URL are required", true);
+                return;
+            }
+
+            showLoading("Saving provider configuration...");
+            try {
+                const body = { name, type, serverUrl, timeoutMs, streamEnabled, enabled };
+                if (id) body.id = parseInt(id);
+                if (apiKey) body.apiKey = apiKey;
+                if (defaultModel) body.defaultModel = defaultModel;
+
+                const res = await fetch("/api/admin/ai-providers", {
+                    method: "POST",
+                    headers: {
+                        "content-type": "application/json",
+                        ...getAuthHeader()
+                    },
+                    body: JSON.stringify(body)
+                });
+
+                if (res.ok) {
+                    showFormStatus("Provider saved successfully!", false);
+                    resetForm();
+                    loadProviders();
+                } else {
+                    const data = await res.json();
+                    showFormStatus("Save failed: " + (data.error || "unknown"), true);
+                }
+            } catch (err) {
+                showFormStatus("Save request failed: " + err.message, true);
+            } finally {
+                hideLoading();
+            }
+        }
+
+        async function editProvider(provider) {
+            resetForm();
+            document.getElementById("providerId").value = provider.id;
+            document.getElementById("providerName").value = provider.name;
+            document.getElementById("providerType").value = provider.type;
+            document.getElementById("serverUrl").value = provider.serverUrl;
+            document.getElementById("apiKey").value = provider.apiKey === "***" ? "***" : "";
+            document.getElementById("timeoutMs").value = provider.timeoutMs;
+            document.getElementById("streamEnabled").checked = provider.streamEnabled;
+            document.getElementById("providerEnabled").checked = provider.enabled;
+            document.getElementById("formTitle").innerText = `Edit Provider: ${provider.name}`;
+
+            onProviderTypeChange();
+            
+            // Populate defaults list
+            updateDefaultModelsList(provider.id, provider.defaultModel);
+        }
+
+        async function updateDefaultModelsList(providerId, currentDefault) {
+            const select = document.getElementById("defaultModelSelect");
+            select.innerHTML = '<option value="">Loading...</option>';
+            try {
+                const res = await fetch("/api/admin/ai-models", { headers: getAuthHeader() });
+                const grouped = await res.json();
+                const providerObj = configuredProviders.find(p => p.id === providerId);
+                const models = grouped[providerObj.name] || [];
+                
+                if (models.length === 0) {
+                    select.innerHTML = '<option value="">No models synced yet</option>';
+                    return;
+                }
+                
+                select.innerHTML = models.map(m => 
+                    `<option value="${m.name}" ${m.name === currentDefault ? 'selected' : ''}>${m.name}</option>`
+                ).join("");
+            } catch (e) {
+                select.innerHTML = '<option value="">Error fetching models</option>';
+            }
+        }
+
+        let configuredProviders = [];
+
+        async function loadProviders() {
+            try {
+                const res = await fetch("/api/admin/ai-providers", { headers: getAuthHeader() });
+                if (res.status === 401) {
+                    logout();
+                    return;
+                }
+                configuredProviders = await res.json();
+                const listContainer = document.getElementById("providersList");
+                
+                if (configuredProviders.length === 0) {
+                    listContainer.innerHTML = '<div style="color: var(--text-muted); text-align: center;">No providers configured yet.</div>';
+                    return;
+                }
+
+                listContainer.innerHTML = configuredProviders.map(p => {
+                    const statusClass = p.enabled ? "enabled" : "disabled";
+                    const statusText = p.enabled ? "Enabled" : "Disabled";
+                    return `
+                        <div class="provider-item">
+                            <div class="provider-info">
+                                <div class="provider-name-tag">
+                                    ${p.name} 
+                                    <span class="badge type">${p.type}</span>
+                                    <span class="badge ${statusClass}">${statusText}</span>
+                                </div>
+                                <div style="font-size:0.8rem; color:var(--text-muted); margin-top:0.2rem;">${p.serverUrl}</div>
+                                <div style="font-size:0.75rem; color:var(--accent-color); font-weight:500; margin-top:0.2rem;">Default Model: ${p.defaultModel || 'None'}</div>
+                            </div>
+                            <div class="provider-actions">
+                                <button class="primary" onclick='editProvider(${JSON.stringify(p)})'>Edit</button>
+                                <button onclick="syncModels(${p.id})">Sync Models</button>
+                                <button class="danger" onclick="deleteProvider(${p.id})">Delete</button>
+                            </div>
+                        </div>
+                    `;
+                }).join("");
+            } catch (err) {
+                console.error("Load providers error:", err);
+            }
+        }
+
+        async function deleteProvider(id) {
+            if (!confirm("Are you sure you want to delete this provider configuration and all synced models?")) {
+                return;
+            }
+            showLoading("Deleting provider...");
+            try {
+                const res = await fetch(`/api/admin/ai-providers/${id}`, {
+                    method: "DELETE",
+                    headers: getAuthHeader()
+                });
+                if (res.ok) {
+                    resetForm();
+                    loadProviders();
+                    loadModels();
+                }
+            } catch (err) {
+                alert("Delete failed: " + err.message);
+            } finally {
+                hideLoading();
+            }
+        }
+
+        async function syncModels(id) {
+            showLoading("Syncing model list from provider...");
+            try {
+                const res = await fetch(`/api/admin/ai-providers/${id}/sync-models`, {
+                    method: "POST",
+                    headers: getAuthHeader()
+                });
+                if (res.ok) {
+                    alert("Model sync successful!");
+                    loadProviders();
+                    loadModels();
+                } else {
+                    const data = await res.json();
+                    alert("Sync failed: " + (data.error || "unknown error"));
+                }
+            } catch (err) {
+                alert("Sync error: " + err.message);
+            } finally {
+                hideLoading();
+            }
+        }
+
+        async function pullModel() {
+            const activeId = document.getElementById("providerId").value;
+            const model = document.getElementById("pullModelName").value.trim();
+            const pullStatus = document.getElementById("pullStatus");
+
+            if (!activeId) {
+                pullStatus.innerText = "Select an Ollama provider first from Configured Providers by clicking 'Edit'";
+                pullStatus.className = "status-msg error";
+                return;
+            }
+
+            const activeProvider = configuredProviders.find(p => p.id === parseInt(activeId));
+            if (!activeProvider || activeProvider.type !== "ollama") {
+                pullStatus.innerText = "Active provider is not Ollama";
+                pullStatus.className = "status-msg error";
+                return;
+            }
+
+            if (!model) {
+                pullStatus.innerText = "Model name is required";
+                pullStatus.className = "status-msg error";
+                return;
+            }
+
+            showLoading(`Pulling Ollama model: ${model}. This may take a while...`);
+            pullStatus.style.display = "none";
+
+            try {
+                const res = await fetch(`/api/admin/ai-providers/${activeId}/pull-model`, {
+                    method: "POST",
+                    headers: {
+                        "content-type": "application/json",
+                        ...getAuthHeader()
+                    },
+                    body: JSON.stringify({ model })
+                });
+
+                const data = await res.json();
+                if (data.ok) {
+                    pullStatus.innerText = data.message;
+                    pullStatus.className = "status-msg success";
+                    // Sync automatically
+                    await syncModels(activeId);
+                } else {
+                    pullStatus.innerText = data.message;
+                    pullStatus.className = "status-msg error";
+                }
+            } catch (err) {
+                pullStatus.innerText = "Pull failed: " + err.message;
+                pullStatus.className = "status-msg error";
+            } finally {
+                hideLoading();
+            }
+        }
+
+        async function setAsDefault(providerId, model) {
+            showLoading("Setting default model...");
+            try {
+                const res = await fetch(`/api/admin/ai-providers/${providerId}/default-model`, {
+                    method: "POST",
+                    headers: {
+                        "content-type": "application/json",
+                        ...getAuthHeader()
+                    },
+                    body: JSON.stringify({ model })
+                });
+                if (res.ok) {
+                    loadProviders();
+                    loadModels();
+                }
+            } catch (err) {
+                alert("Failed to set default: " + err.message);
+            } finally {
+                hideLoading();
+            }
+        }
+
+        async function loadModels() {
+            try {
+                const res = await fetch("/api/admin/ai-models", { headers: getAuthHeader() });
+                const grouped = await res.json();
+                const tableBody = document.getElementById("modelsTableBody");
+                
+                const rows = [];
+                for (const [providerName, models] of Object.entries(grouped)) {
+                    const providerObj = configuredProviders.find(p => p.name === providerName);
+                    if (!providerObj) continue;
+
+                    for (const m of models) {
+                        const sizeGB = m.size ? (m.size / (1024 * 1024 * 1024)).toFixed(2) + " GB" : "-";
+                        const dateStr = m.modifiedAt ? new Date(m.modifiedAt).toLocaleString() : "-";
+                        const isDefault = providerObj.defaultModel === m.name;
+                        const defaultBtn = isDefault 
+                            ? `<span class="badge enabled">DEFAULT</span>` 
+                            : `<button onclick="setAsDefault(${providerObj.id}, '${m.name}')">Set Default</button>`;
+
+                        rows.push(`
+                            <tr>
+                                <td>${providerName} <span class="badge type">${providerObj.type}</span></td>
+                                <td><strong>${m.name}</strong></td>
+                                <td>${sizeGB}</td>
+                                <td>${dateStr}</td>
+                                <td>${defaultBtn}</td>
+                            </tr>
+                        `);
+                    }
+                }
+
+                if (rows.length === 0) {
+                    tableBody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">No models synced yet. Use Sync Models on a configured provider.</td></tr>`;
+                } else {
+                    tableBody.innerHTML = rows.join("");
+                }
+            } catch (err) {
+                console.error("Load models table error:", err);
+            }
+        }
+    </script>
+</body>
+</html>
