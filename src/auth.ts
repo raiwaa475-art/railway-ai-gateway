@@ -13,7 +13,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
         });
     }
 
-    const auth = req.header("authorization") || "";
+    const auth = req.header("authorization") || req.header("x-api-key") || "";
     const token = auth.replace(/^Bearer\s+/i, "").trim();
 
     if (token !== expectedKey) {
