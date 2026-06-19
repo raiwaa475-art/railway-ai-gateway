@@ -1,21 +1,12 @@
 import { Router } from "express";
 import crypto from "crypto";
 import { authMiddleware } from "../auth.js";
-import { DeepSeekProvider, sanitizeAnthropicResponse } from "../providers/deepseek.js";
-import { QwenLocalProvider } from "../providers/qwen-local.js";
-import { Provider } from "../providers/base.js";
+import { sanitizeAnthropicResponse } from "../providers/deepseek.js";
+import { SUPPORTED_MODELS } from "../config/models.js";
+import { ModelRouter } from "../routing/router.js";
+import { OrchestratorService } from "../routing/orchestrator.js";
 
 export const gatewayRouter = Router();
-
-const deepseekProvider = new DeepSeekProvider();
-const qwenProvider = new QwenLocalProvider();
-
-function getProvider(model?: string): Provider {
-    if (model && model.toLowerCase().includes("qwen")) {
-        return qwenProvider;
-    }
-    return deepseekProvider;
-}
 
 function logRequest(info: Record<string, unknown>) {
     console.log(JSON.stringify({
@@ -44,22 +35,13 @@ gatewayRouter.get("/health", (_req, res) => {
 
 gatewayRouter.get("/v1/models", authMiddleware, (_req, res) => {
     res.json({
-        data: [
-            {
-                id: "deepseek-v4-flash",
-                type: "model",
-                display_name: "DeepSeek V4 Flash",
-                provider: "deepseek",
-                gateway_role: "default"
-            },
-            {
-                id: "qwen-local",
-                type: "model",
-                display_name: "Qwen Local (Ollama/Tunnel)",
-                provider: "qwen-local",
-                gateway_role: "local-dev"
-            }
-        ]
+        data: SUPPORTED_MODELS.map(m => ({
+            id: m.id,
+            type: "model",
+            display_name: m.displayName,
+            provider: m.providerId,
+            gateway_role: m.providerId === "deepseek" ? "default" : "local-dev"
+        }))
     });
 });
 
@@ -67,7 +49,57 @@ gatewayRouter.post("/v1/messages", authMiddleware, async (req, res) => {
     const requestId = crypto.randomUUID();
     const startTime = Date.now();
     const clientModel = req.body?.model;
-    const provider = getProvider(clientModel);
+
+    if (clientModel === "hybrid-flow" || clientModel === "qwen-smart") {
+        logRequest({
+            type: "request",
+            requestId,
+            method: req.method,
+            path: req.path,
+            clientModel,
+            upstreamModel: "hybrid-orchestration",
+            stream: !!req.body?.stream,
+            provider: "hybrid-orchestrator"
+        });
+        try {
+            await OrchestratorService.handleTwinModels(req, res);
+            logRequest({
+                type: "response",
+                requestId,
+                method: req.method,
+                path: req.path,
+                clientModel,
+                upstreamModel: "hybrid-orchestration",
+                status: 200,
+                latencyMs: Date.now() - startTime,
+                stream: !!req.body?.stream,
+                provider: "hybrid-orchestrator"
+            });
+        } catch (err: any) {
+            logRequest({
+                type: "response",
+                requestId,
+                method: req.method,
+                path: req.path,
+                clientModel,
+                upstreamModel: "hybrid-orchestration",
+                status: 500,
+                latencyMs: Date.now() - startTime,
+                stream: !!req.body?.stream,
+                errorMessage: err.message,
+                provider: "hybrid-orchestrator"
+            });
+            res.status(500).json({
+                error: {
+                    type: "gateway_error",
+                    message: err.message || "Unknown error inside Hybrid Orchestrator"
+                }
+            });
+        }
+        return;
+    }
+
+    const provider = ModelRouter.resolve(clientModel);
     const upstreamModel = provider.resolveUpstreamModel(clientModel);
     const isStream = !!req.body?.stream;
 
