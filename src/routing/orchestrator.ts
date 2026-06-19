@@ -796,10 +796,12 @@ Expected JSON shape:
             savedThb = savedInputThb + savedOutputThb;
         }
 
+        const upstreamModel = deepseekProvider.resolveUpstreamModel(body.model);
+
         await insertModelCall({
             requestId,
             provider: "deepseek",
-            model: body.model || config.defaultModel,
+            model: upstreamModel,
             inputTokens,
             outputTokens,
             cacheHitInputTokens: cacheReadTokens,
