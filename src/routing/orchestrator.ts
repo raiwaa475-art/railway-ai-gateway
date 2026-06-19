@@ -17,24 +17,29 @@ function isCodeTask(text: string): boolean {
     const keywords = [
         "แก้", "เขียน", "เพิ่ม", "ลบ", "เปลี่ยน", "refactor",
         "fix", "implement", "edit", "update", "patch", "code",
-        "bug", "error", "test", "build"
+        "bug", "error", "test", "build",
+        "ทำ", "ปรับ", "เปลี่ยนสี", "แก้ไข", "สร้าง", "ใส่", "ลบออก", "เพิ่ม route", "เพิ่ม endpoint"
     ];
     return keywords.some(k => text.toLowerCase().includes(k.toLowerCase()));
 }
 
-function getLastUserText(messages: any[]): string {
+function getLastHumanInstruction(messages: any[]): string {
     for (let i = messages.length - 1; i >= 0; i--) {
         const msg = messages[i];
-        if (msg.role === "user") {
-            if (typeof msg.content === "string") {
-                return msg.content;
-            }
-            if (Array.isArray(msg.content)) {
-                return msg.content
-                    .filter((block: any) => block?.type === "text")
-                    .map((block: any) => block.text || "")
-                    .join("\n");
-            }
+        if (msg.role !== "user") continue;
+
+        if (typeof msg.content === "string" && msg.content.trim()) {
+            return msg.content;
+        }
+
+        if (Array.isArray(msg.content)) {
+            const text = msg.content
+                .filter((block: any) => block?.type === "text")
+                .map((block: any) => block.text || "")
+                .join("\n")
+                .trim();
+
+            if (text) return text;
         }
     }
     return "";
@@ -192,7 +197,7 @@ export class OrchestratorService {
 
         const messages = req.body.messages || [];
         const hasResults = hasToolResults(messages);
-        const lastUserText = getLastUserText(messages);
+        const lastUserText = getLastHumanInstruction(messages);
         const isCode = isCodeTask(lastUserText);
 
         const isStream = !!req.body.stream;
