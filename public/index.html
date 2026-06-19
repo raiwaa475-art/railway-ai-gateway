@@ -109,6 +109,12 @@
             gap: 1.5rem;
         }
 
+        .qwen-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+            gap: 1rem;
+        }
+
         .card {
             background: var(--card-bg);
             backdrop-filter: blur(12px);
@@ -220,6 +226,57 @@
             background-color: rgba(16, 185, 129, 0.15);
             color: #34d399;
             border: 1px solid rgba(16, 185, 129, 0.3);
+        }
+
+        .badge.green {
+            background-color: rgba(16, 185, 129, 0.15);
+            color: #34d399;
+            border: 1px solid rgba(16, 185, 129, 0.3);
+        }
+
+        .badge.red {
+            background-color: rgba(239, 68, 68, 0.15);
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+
+        .badge.yellow {
+            background-color: rgba(245, 158, 11, 0.15);
+            color: #fbbf24;
+            border: 1px solid rgba(245, 158, 11, 0.3);
+        }
+
+        .badge.blue {
+            background-color: rgba(59, 130, 246, 0.15);
+            color: #60a5fa;
+            border: 1px solid rgba(59, 130, 246, 0.3);
+        }
+
+        .badge.gray {
+            background-color: rgba(156, 163, 175, 0.12);
+            color: #d1d5db;
+            border: 1px solid rgba(156, 163, 175, 0.22);
+        }
+
+        .cell-muted {
+            color: var(--text-muted);
+            font-size: 0.78rem;
+            line-height: 1.35;
+            margin-top: 0.35rem;
+        }
+
+        .cell-stack {
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+            min-width: 120px;
+        }
+
+        .fix-hint {
+            max-width: 220px;
+            color: #d1d5db;
+            font-size: 0.82rem;
+            line-height: 1.35;
         }
 
         .auth-container {
@@ -346,10 +403,49 @@
             </div>
         </div>
 
+        <div class="qwen-grid">
+            <div class="card">
+                <span class="card-title">Qwen Success Rate</span>
+                <span class="card-value" id="qwenSuccessRate">-</span>
+                <span class="card-sub" id="qwenSuccessSub">0 valid / 0 calls</span>
+            </div>
+            <div class="card">
+                <span class="card-title">Qwen Failed Count</span>
+                <span class="card-value" id="qwenFailedCount">0</span>
+                <span class="card-sub">qwen_patch_valid=false</span>
+            </div>
+            <div class="card">
+                <span class="card-title">Top Fallback Reason</span>
+                <span class="card-value" id="qwenTopFallback" style="font-size: 1.15rem; line-height: 1.25;">-</span>
+                <span class="card-sub" id="qwenTopFallbackSub">No Qwen fallback rows</span>
+            </div>
+            <div class="card">
+                <span class="card-title">Exact Context Rate</span>
+                <span class="card-value" id="qwenExactContextRate">-</span>
+                <span class="card-sub" id="qwenExactContextSub">0 exact / 0 calls</span>
+            </div>
+            <div class="card">
+                <span class="card-title">DeepSeek Fallback Output Tokens</span>
+                <span class="card-value" id="deepseekFallbackTokens">0</span>
+                <span class="card-sub">Inferred by request_id after Qwen fallback</span>
+            </div>
+        </div>
+
         <div class="recent-section">
             <div class="section-header">
                 <h2>Recent Model Calls</h2>
-                <button onclick="loadData()">Refresh</button>
+                <div class="controls">
+                    <select id="callFilter" onchange="renderRecentCalls()">
+                        <option value="all">All</option>
+                        <option value="qwen_failed">Qwen Failed</option>
+                        <option value="advisory_only">Advisory Only</option>
+                        <option value="file_mismatch">File Mismatch</option>
+                        <option value="line_range_error">Line Range Error</option>
+                        <option value="deepseek_fallback">DeepSeek Fallback</option>
+                        <option value="exact_context">Exact Context Only</option>
+                    </select>
+                    <button onclick="loadData()">Refresh</button>
+                </div>
             </div>
             <div class="table-wrapper">
                 <table>
@@ -361,7 +457,12 @@
                             <th>Input Tokens</th>
                             <th>Output Tokens</th>
                             <th>Total Tokens</th>
-                            <th>Draft</th>
+                            <th>Patch Mode</th>
+                            <th>Patch Status</th>
+                            <th>Fallback Reason</th>
+                            <th>Context Source</th>
+                            <th>Retry</th>
+                            <th>Fix Hint</th>
                             <th>Latency</th>
                             <th>Cost</th>
                             <th>Saved</th>
@@ -369,7 +470,7 @@
                     </thead>
                     <tbody id="recentTableBody">
                         <tr>
-                            <td colspan="10" style="text-align: center; color: var(--text-muted);">No records found.</td>
+                            <td colspan="15" style="text-align: center; color: var(--text-muted);">No records found.</td>
                         </tr>
                     </tbody>
                 </table>
@@ -383,6 +484,188 @@
         const gatewayKeyInput = document.getElementById("gatewayKeyInput");
         const authError = document.getElementById("authError");
         const loadingOverlay = document.getElementById("loadingOverlay");
+        let currentRecentCalls = [];
+
+        function escapeHtml(value) {
+            return String(value ?? "-")
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#39;");
+        }
+
+        function isQwenCall(call) {
+            return call.provider === "qwen-local";
+        }
+
+        function isExactContext(call) {
+            return call.file_context_source === "tool_result_exact" || call.file_context_source === "disk_exact";
+        }
+
+        function isAdvisoryOnly(call) {
+            const reason = call.fallback_reason || "";
+            return reason.includes("advisory_only") ||
+                reason === "no_workspace_file_on_gateway" ||
+                reason === "file_not_found_on_disk" ||
+                call.direct_edit_eligible === false;
+        }
+
+        function isLineRangeError(call) {
+            const reason = call.fallback_reason || "";
+            return reason.includes("line_range");
+        }
+
+        function badge(text, color = "gray") {
+            if (!text || text === "-") return `<span class="cell-muted">-</span>`;
+            return `<span class="badge ${color}">${escapeHtml(text)}</span>`;
+        }
+
+        function getReasonBadge(reason) {
+            if (!reason) return `<span class="cell-muted">-</span>`;
+            if (reason === "file_mismatch") return badge("FILE_MISMATCH", "red");
+            if (reason.includes("line_range")) return badge("LINE_RANGE_ERROR", "red");
+            if (reason.includes("advisory_only") || reason === "no_workspace_file_on_gateway" || reason === "file_not_found_on_disk") return badge("ADVISORY_ONLY", "yellow");
+            if (reason.startsWith("approval_rejected") || reason === "approval_parse_failed") return badge(reason, "yellow");
+            if (reason.startsWith("retry_") || reason === "line_range_replace" || reason === "tool_result_exact_context_used") return badge(reason, "green");
+            return badge(reason, "gray");
+        }
+
+        function getPatchStatus(call) {
+            if (!isQwenCall(call)) return "-";
+            if (call.deepseek_approval_approved === true) return "APPROVED";
+            if (call.qwen_patch_valid === true) return "VALID";
+            if (isAdvisoryOnly(call)) return "ADVISORY_ONLY";
+            if (call.qwen_patch_valid === false) return "FAILED";
+            return "-";
+        }
+
+        function getStatusBadge(call) {
+            const status = getPatchStatus(call);
+            if (status === "VALID" || status === "APPROVED") return badge(status, "green");
+            if (status === "FAILED") return badge(status, "red");
+            if (status === "ADVISORY_ONLY") return badge(status, "yellow");
+            return badge(status, "gray");
+        }
+
+        function getContextBadge(call) {
+            const source = call.file_context_source || "-";
+            if (source === "tool_result_exact" || source === "disk_exact") return badge(source, "green");
+            if (source === "tool_result_partial" || source === "reduced_context" || source === "none") return badge("NO_EXACT_CONTEXT", "yellow") + `<div class="cell-muted">${escapeHtml(source)}</div>`;
+            return badge(source, "gray");
+        }
+
+        function getFixHint(call) {
+            const reason = call.fallback_reason || call.qwen_patch_reason || "";
+            if (reason === "file_mismatch") return "Normalize path or force FILE to exact targetFile";
+            if (reason === "line_range_out_of_bounds") return "Retry with total line count and bounded START_LINE/END_LINE";
+            if (reason === "tool_result_partial_context_advisory_only") return "Read exact file content before Qwen patch";
+            if (reason === "reduced_context_advisory_only") return "Do not validate patch from reduced context";
+            if (reason === "no_workspace_file_on_gateway") return "Enable exact tool_result context; avoid Railway disk dependency";
+            if (reason === "approval_parse_failed") return "Force approval model to return JSON only";
+            if (reason === "replace_too_large") return "Reduce patch range or allow explicit large rewrite only";
+            if (reason === "find_block_not_found_in_context") return "Use line_range_replace from exact numbered file";
+            if (reason === "unified_diff" || call.qwen_draft_mode === "unified_diff" || call.qwen_patch_mode === "unified_diff") return "Retry as line_range_replace";
+            return "-";
+        }
+
+        function updateQwenHealthCards(calls) {
+            const qwenCalls = calls.filter(isQwenCall);
+            const total = qwenCalls.length;
+            const valid = qwenCalls.filter(call => call.qwen_patch_valid === true).length;
+            const failed = qwenCalls.filter(call => call.qwen_patch_valid === false).length;
+            const exact = qwenCalls.filter(isExactContext).length;
+            const fallbackCounts = {};
+
+            qwenCalls.forEach(call => {
+                const reason = call.fallback_reason;
+                if (reason) fallbackCounts[reason] = (fallbackCounts[reason] || 0) + 1;
+            });
+
+            const topFallback = Object.entries(fallbackCounts).sort((a, b) => b[1] - a[1])[0];
+            const fallbackRequestIds = new Set(qwenCalls
+                .filter(call => call.qwen_patch_valid === false || (call.fallback_reason && !call.deepseek_approval_approved))
+                .map(call => call.request_id)
+                .filter(Boolean));
+            const deepseekFallbackTokens = calls
+                .filter(call => call.provider === "deepseek" && fallbackRequestIds.has(call.request_id))
+                .reduce((sum, call) => sum + (Number(call.output_tokens) || 0), 0);
+
+            document.getElementById("qwenSuccessRate").innerText = total ? `${Math.round((valid / total) * 100)}%` : "-";
+            document.getElementById("qwenSuccessSub").innerText = `${valid.toLocaleString()} valid / ${total.toLocaleString()} calls`;
+            document.getElementById("qwenFailedCount").innerText = failed.toLocaleString();
+            document.getElementById("qwenExactContextRate").innerText = total ? `${Math.round((exact / total) * 100)}%` : "-";
+            document.getElementById("qwenExactContextSub").innerText = `${exact.toLocaleString()} exact / ${total.toLocaleString()} calls`;
+            document.getElementById("qwenTopFallback").innerText = topFallback ? topFallback[0] : "-";
+            document.getElementById("qwenTopFallbackSub").innerText = topFallback ? `${topFallback[1].toLocaleString()} recent rows` : "No Qwen fallback rows";
+            document.getElementById("deepseekFallbackTokens").innerText = deepseekFallbackTokens.toLocaleString();
+        }
+
+        function callMatchesFilter(call, filter) {
+            if (filter === "all") return true;
+            if (filter === "qwen_failed") return isQwenCall(call) && call.qwen_patch_valid === false;
+            if (filter === "advisory_only") return isQwenCall(call) && isAdvisoryOnly(call);
+            if (filter === "file_mismatch") return isQwenCall(call) && call.fallback_reason === "file_mismatch";
+            if (filter === "line_range_error") return isQwenCall(call) && isLineRangeError(call);
+            if (filter === "deepseek_fallback") {
+                const fallbackRequestIds = new Set(currentRecentCalls
+                    .filter(row => isQwenCall(row) && (row.qwen_patch_valid === false || (row.fallback_reason && !row.deepseek_approval_approved)))
+                    .map(row => row.request_id)
+                    .filter(Boolean));
+                return call.provider === "deepseek" && fallbackRequestIds.has(call.request_id);
+            }
+            if (filter === "exact_context") return isQwenCall(call) && isExactContext(call);
+            return true;
+        }
+
+        function renderRecentCalls() {
+            const filter = document.getElementById("callFilter")?.value || "all";
+            const tableBody = document.getElementById("recentTableBody");
+            const calls = currentRecentCalls.filter(call => callMatchesFilter(call, filter));
+
+            if (calls.length === 0) {
+                tableBody.innerHTML = `<tr><td colspan="15" style="text-align: center; color: var(--text-muted);">No records found.</td></tr>`;
+                return;
+            }
+
+            tableBody.innerHTML = calls.map(call => {
+                const date = new Date(call.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                const providerClass = call.provider === 'deepseek' ? 'deepseek' : 'qwen';
+                const providerText = call.provider === 'deepseek' ? 'DeepSeek' : 'Qwen Local';
+                const inputTokens = Number(call.input_tokens) || 0;
+                const outputTokens = Number(call.output_tokens) || 0;
+                const totalTokens = inputTokens + outputTokens;
+                const draftMode = isQwenCall(call) && call.qwen_draft_mode ? call.qwen_draft_mode : '-';
+                const patchMode = call.qwen_patch_mode || draftMode;
+                const draftChars = Number(call.qwen_draft_chars) || 0;
+                const modeDetail = draftChars ? `<div class="cell-muted">draft ${escapeHtml(draftMode)} / ${draftChars.toLocaleString()} chars</div>` : `<div class="cell-muted">draft ${escapeHtml(draftMode)}</div>`;
+                const retry = call.qwen_retry_used ? badge("RETRY", "blue") : `<span class="cell-muted">-</span>`;
+                const cost = Number(call.cost_usd) > 0 ? `$${Number(call.cost_usd).toFixed(4)}` : '-';
+                const saved = Number(call.saved_usd) > 0 ? `$${Number(call.saved_usd).toFixed(4)}` : '-';
+                const latency = Number(call.latency_ms) || 0;
+                const fixHint = getFixHint(call);
+
+                return `
+                    <tr>
+                        <td>${date}</td>
+                        <td><span class="badge ${providerClass}">${providerText}</span></td>
+                        <td>${escapeHtml(call.model)}</td>
+                        <td>${inputTokens.toLocaleString()}</td>
+                        <td>${outputTokens.toLocaleString()}</td>
+                        <td>${totalTokens.toLocaleString()}</td>
+                        <td><div class="cell-stack">${badge(patchMode, patchMode === "invalid" ? "red" : "gray")}${modeDetail}</div></td>
+                        <td>${getStatusBadge(call)}</td>
+                        <td>${getReasonBadge(call.fallback_reason)}</td>
+                        <td>${isQwenCall(call) ? getContextBadge(call) : `<span class="cell-muted">-</span>`}</td>
+                        <td>${retry}</td>
+                        <td><div class="fix-hint">${escapeHtml(fixHint)}</div></td>
+                        <td>${latency.toLocaleString()} ms</td>
+                        <td>${cost}</td>
+                        <td style="color: ${Number(call.saved_usd) > 0 ? 'var(--success-color)' : 'inherit'}">${saved}</td>
+                    </tr>
+                `;
+            }).join("");
+        }
 
         // Check token on start
         window.addEventListener("DOMContentLoaded", () => {
@@ -461,80 +744,13 @@
                 document.getElementById("statNetTHB").innerText = `${baht}${summary.total_net_cost_thb.toFixed(2)} THB`;
 
                 // Fetch recent calls
-                const recentRes = await fetch("/admin/usage/recent?limit=10", {
+                const recentRes = await fetch("/admin/usage/recent?limit=100", {
                     headers: { "Authorization": `Bearer ${apiKey}` }
                 });
                 const recentCalls = await recentRes.json();
-
-                const tableBody = document.getElementById("recentTableBody");
-                if (recentCalls.length === 0) {
-                    tableBody.innerHTML = `<tr><td colspan="10" style="text-align: center; color: var(--text-muted);">No records found.</td></tr>`;
-                } else {
-                    tableBody.innerHTML = recentCalls.map(call => {
-                        const date = new Date(call.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-                        const providerClass = call.provider === 'deepseek' ? 'deepseek' : 'qwen';
-                        const providerText = call.provider === 'deepseek' ? 'DeepSeek' : 'Qwen Local';
-                        const inputTokens = Number(call.input_tokens) || 0;
-                        const outputTokens = Number(call.output_tokens) || 0;
-                        const totalTokens = inputTokens + outputTokens;
-                        const draftMode = call.provider === 'qwen-local' && call.qwen_draft_mode ? call.qwen_draft_mode : '-';
-                        const draftChars = Number(call.qwen_draft_chars) || 0;
-                        const draftFlags = [];
-                        if (call.qwen_retry_used) draftFlags.push('retry');
-                        if (call.qwen_draft_weak) draftFlags.push('weak');
-                        if (call.qwen_patch_valid === true) draftFlags.push('valid');
-                        if (call.deepseek_approval_approved === true) draftFlags.push('approved');
-                        if (call.emitted_tool_use) draftFlags.push(call.emitted_tool_use);
-
-                        if (call.provider === 'qwen-local') {
-                            if (call.file_context_source === 'tool_result_exact' || call.fallback_reason === 'tool_result_exact_context_used') {
-                                draftFlags.push('exact_context:tool_result');
-                            } else if (call.file_context_source === 'disk_exact' || call.fallback_reason === 'railway_disk_context_used_dev_only') {
-                                draftFlags.push('exact_context:disk_dev_only');
-                            } else if (call.direct_edit_eligible === false || call.fallback_reason === 'no_exact_file_context_advisory_only' || call.fallback_reason === 'tool_result_partial_context_advisory_only' || call.fallback_reason === 'reduced_context_advisory_only' || call.fallback_reason === 'no_workspace_file_on_gateway' || call.fallback_reason === 'file_not_found_on_disk') {
-                                draftFlags.push('advisory_only:no_exact_file_context');
-                            }
-                        }
-
-                        if (call.fallback_reason) {
-                             const fr = call.fallback_reason;
-                             const isContextReason = fr === 'no_exact_file_context_advisory_only' ||
-                                                     fr === 'tool_result_partial_context_advisory_only' ||
-                                                     fr === 'reduced_context_advisory_only' ||
-                                                     fr === 'no_workspace_file_on_gateway' ||
-                                                     fr === 'file_not_found_on_disk' ||
-                                                     fr === 'tool_result_exact_context_used' ||
-                                                     fr === 'railway_disk_context_used_dev_only';
-                             if (!isContextReason) {
-                                 if (fr.startsWith("retry_") || fr.startsWith("unified_diff_") || fr === "line_range_replace" || fr.startsWith("tool_result_exact_")) {
-                                     draftFlags.push(fr);
-                                 } else {
-                                     draftFlags.push(`fallback:${fr}`);
-                                 }
-                             }
-                        }
-                        const patchMode = call.qwen_patch_mode || draftMode;
-                        const draftSuffix = draftFlags.length ? ` ${draftFlags.join(', ')}` : '';
-                        const draft = patchMode !== '-' ? `${patchMode} (${draftChars.toLocaleString()})${draftSuffix}` : '-';
-                        const cost = Number(call.cost_usd) > 0 ? `$${Number(call.cost_usd).toFixed(4)}` : '-';
-                        const saved = Number(call.saved_usd) > 0 ? `$${Number(call.saved_usd).toFixed(4)}` : '-';
-
-                        return `
-                            <tr>
-                                <td>${date}</td>
-                                <td><span class="badge ${providerClass}">${providerText}</span></td>
-                                <td>${call.model}</td>
-                                <td>${inputTokens.toLocaleString()}</td>
-                                <td>${outputTokens.toLocaleString()}</td>
-                                <td>${totalTokens.toLocaleString()}</td>
-                                <td>${draft}</td>
-                                <td>${call.latency_ms.toLocaleString()} ms</td>
-                                <td>${cost}</td>
-                                <td style="color: ${Number(call.saved_usd) > 0 ? 'var(--success-color)' : 'inherit'}">${saved}</td>
-                            </tr>
-                        `;
-                    }).join("");
-                }
+                currentRecentCalls = Array.isArray(recentCalls) ? recentCalls : [];
+                updateQwenHealthCards(currentRecentCalls);
+                renderRecentCalls();
 
             } catch (err) {
                 console.error("Failed to load dashboard data:", err);

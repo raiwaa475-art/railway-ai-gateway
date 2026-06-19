@@ -157,6 +157,34 @@ function normalizeNewlines(str: string): string {
     return str.replace(/\r\n/g, "\n");
 }
 
+function normalizePatchPath(filePath: string): string {
+    let p = String(filePath || "").trim();
+    p = p.replace(/^["'`]+|["'`]+$/g, "");
+    p = p.replace(/\\/g, "/");
+    p = p.replace(/\/+/g, "/");
+    p = p.replace(/^\.\//, "");
+    p = p.replace(/^[ab]\//, "");
+
+    const cwd = process.cwd().replace(/\\/g, "/").replace(/\/+$/g, "");
+    const lower = p.toLowerCase();
+    const lowerCwd = cwd.toLowerCase();
+    if (lower === lowerCwd) {
+        return "";
+    }
+    if (lower.startsWith(`${lowerCwd}/`)) {
+        p = p.slice(cwd.length + 1);
+    }
+
+    const workspaceName = path.basename(cwd).toLowerCase();
+    const parts = p.split("/").filter(Boolean);
+    const workspaceIndex = parts.findIndex(part => part.toLowerCase() === workspaceName);
+    if (workspaceIndex >= 0 && workspaceIndex < parts.length - 1) {
+        p = parts.slice(workspaceIndex + 1).join("/");
+    }
+
+    return p.replace(/^\/+/, "").toLowerCase();
+}
+
 function cleanMarkdownFences(text: string): string {
     return text
         .split("\n")
@@ -251,6 +279,41 @@ function getTargetFileFromRecentToolUse(messages: any[]): string {
     }
 
     return "";
+}
+
+function getRecentToolFilePaths(messages: any[]): string[] {
+    const paths: string[] = [];
+
+    for (const msg of messages.slice(-10)) {
+        if (!Array.isArray(msg.content)) continue;
+
+        for (const block of msg.content) {
+            if (block?.type !== "tool_use") continue;
+            const input = block.input || {};
+            const filePath = input.AbsolutePath || input.file_path || input.path;
+            if (typeof filePath === "string" && filePath.trim()) {
+                paths.push(filePath.trim());
+            }
+        }
+    }
+
+    return paths;
+}
+
+function isUniqueRecentBasenameMatch(messages: any[], filePath: string, targetFile: string): boolean {
+    const normalizedFilePath = normalizePatchPath(filePath);
+    const normalizedTargetFile = normalizePatchPath(targetFile);
+    const fileBase = path.basename(normalizedFilePath);
+    const targetBase = path.basename(normalizedTargetFile);
+    if (!fileBase || fileBase !== targetBase) return false;
+
+    const matchingRecentPaths = new Set(
+        getRecentToolFilePaths(messages)
+            .map(normalizePatchPath)
+            .filter(p => path.basename(p) === targetBase)
+    );
+
+    return matchingRecentPaths.size === 1;
 }
 
 function getRecentToolResultText(messages: any[], maxChars = 12000): string {
@@ -475,9 +538,58 @@ function clampNumber(val: number, min: number, max: number): number {
     return Math.min(Math.max(val, min), max);
 }
 
+function extractTextFromToolContent(content: any): string {
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+        return content.map(item => {
+            if (typeof item === "string") return item;
+            if (item?.type === "text" && typeof item.text === "string") return item.text;
+            return extractTextFromToolContent(item);
+        }).filter(Boolean).join("\n");
+    }
+    if (content && typeof content === "object") {
+        for (const key of ["content", "text", "output", "stdout", "data"]) {
+            if (content[key] !== undefined) {
+                const extracted = extractTextFromToolContent(content[key]);
+                if (extracted) return extracted;
+            }
+        }
+        return "";
+    }
+    return "";
+}
+
+function unwrapToolResultText(content: any): string {
+    let rawText = extractTextFromToolContent(content);
+    for (let i = 0; i < 2; i++) {
+        const trimmed = rawText.trim();
+        if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) break;
+        try {
+            const parsed = JSON.parse(trimmed);
+            const extracted = extractTextFromToolContent(parsed);
+            if (!extracted || extracted === rawText) break;
+            rawText = extracted;
+        } catch {
+            break;
+        }
+    }
+    return rawText;
+}
+
+function stripLineNumberPrefixes(text: string): string {
+    const normalized = normalizeNewlines(text);
+    const lines = normalized.split("\n");
+    const prefixedLines = lines.filter(line => /^\s*\d+\s*(?:\||:)\s?/.test(line)).length;
+    if (prefixedLines === 0 || prefixedLines < Math.max(2, Math.floor(lines.length * 0.5))) {
+        return normalized;
+    }
+    return lines.map(line => line.replace(/^\s*\d+\s*(?:\||:)\s?/, "")).join("\n");
+}
+
 function getFileContentFromToolResults(messages: any[], targetFilePath: string): { content: string; isExact: boolean } {
     if (!targetFilePath) return { content: "", isExact: false };
-    const targetName = path.basename(targetFilePath).toLowerCase();
+    const normalizedTarget = normalizePatchPath(targetFilePath);
+    const targetName = path.basename(normalizedTarget);
 
     for (const msg of messages.slice().reverse()) {
         if (!Array.isArray(msg.content)) continue;
@@ -497,36 +609,22 @@ function getFileContentFromToolResults(messages: any[], targetFilePath: string):
                         const toolUseBlock = toolUseMsg.content.find((b: any) => b?.type === "tool_use" && b.id === toolUseId);
                         toolName = toolUseBlock?.name || "";
                         const inputPath = toolUseBlock?.input?.AbsolutePath || toolUseBlock?.input?.file_path || toolUseBlock?.input?.path || "";
-                        if (typeof inputPath === "string" && inputPath.toLowerCase().endsWith(targetName)) {
+                        const normalizedInputPath = typeof inputPath === "string" ? normalizePatchPath(inputPath) : "";
+                        if (
+                            normalizedInputPath === normalizedTarget ||
+                            (path.basename(normalizedInputPath) === targetName && isUniqueRecentBasenameMatch(messages, normalizedInputPath, normalizedTarget))
+                        ) {
                             isMatch = true;
                         }
                     }
                 }
 
                 if (isMatch) {
-                    let rawText = "";
-                    if (typeof block.content === "string") {
-                        rawText = block.content;
-                    } else if (Array.isArray(block.content)) {
-                        rawText = block.content.map((b: any) => {
-                            if (typeof b === "string") return b;
-                            return b?.text || b?.content || JSON.stringify(b);
-                        }).join("\n");
-                    } else if (typeof block.content === "object" && block.content !== null) {
-                        rawText = block.content.text || block.content.content || JSON.stringify(block.content);
-                    }
-
-                    try {
-                        const parsed = JSON.parse(rawText);
-                        if (parsed && typeof parsed === "object") {
-                            rawText = parsed.content || parsed.text || rawText;
-                        }
-                    } catch {}
-
-                    rawText = rawText.replace(/\r\n/g, "\n");
+                    let rawText = stripLineNumberPrefixes(unwrapToolResultText(block.content));
 
                     const lowerTool = toolName.toLowerCase();
-                    const isExact = lowerTool.includes("view") || lowerTool.includes("read") || lowerTool.includes("show") || lowerTool.includes("get");
+                    const exactToolPattern = /(^|[_\-\s.])(read|view|get|open|cat|show)([_\-\s.]|$)/i;
+                    const isExact = exactToolPattern.test(lowerTool) || /file.*(content|text)/i.test(lowerTool);
 
                     return { content: rawText, isExact };
                 }
@@ -550,6 +648,8 @@ function validateQwenPatch(
     const find = patch.find || "";
     const replace = patch.replace || "";
     const targetFile = getTargetFileFromRecentToolUse(messages);
+    const normalizedPatchFile = normalizePatchPath(filePath);
+    const normalizedTargetFile = normalizePatchPath(targetFile);
 
     const normalizedFind = normalizeNewlines(find);
     const normalizedReplace = normalizeNewlines(replace);
@@ -575,7 +675,11 @@ function validateQwenPatch(
     if (!replace) {
         return { ...patch, ok: false, reason: "empty_replace" };
     }
-    if (targetFile && filePath !== targetFile) {
+    const isTargetFileMatch = !targetFile ||
+        normalizedPatchFile === normalizedTargetFile ||
+        isUniqueRecentBasenameMatch(messages, filePath, targetFile);
+
+    if (targetFile && !isTargetFileMatch) {
         return { ...patch, ok: false, reason: "file_mismatch" };
     }
     if (blockedPathPatterns.some(pattern => filePath.includes(pattern)) && !explicitlyRequestedFile) {
@@ -587,7 +691,6 @@ function validateQwenPatch(
     }
 
     const hasAtLeast5Lines = findLines.length >= 5;
-    const isTargetFileMatch = !targetFile || filePath === targetFile;
     const canUseExpandedRatio = hasAtLeast5Lines && isTargetFileMatch && hasExactOriginalFileContent;
     const replaceRatioLimit = explicitlyLargeRewrite ? 20 : (canUseExpandedRatio ? 5 : 3);
 
@@ -1261,6 +1364,7 @@ Expected JSON shape:
         const hasExactOriginalFileContent = rawFileContent.length > 0 && (fileContextSource === "tool_result_exact" || fileContextSource === "disk_exact");
         const directEditEligible = hasExactOriginalFileContent;
         const qwenDelegationMode = directEditEligible ? "patch_draft" : "advisory_draft";
+        const totalLineCount = hasExactOriginalFileContent ? rawFileContent.split("\n").length : 0;
 
         let originalContentBlock = "";
         if (hasExactOriginalFileContent) {
@@ -1282,16 +1386,20 @@ ${rawFileContent}
 Use it as the only source of truth.
 Return a patch that can be applied safely.
 
-Preferred format:
+Return ONLY this format:
 FILE: <target file path>
 START_LINE: <first line number>
 END_LINE: <last line number>
 REPLACE: <replacement code without line numbers>
 
-If line range is not possible, return:
-FILE: <target file path>
-FIND: <exact original block copied from Exact File Content>
-REPLACE: <replacement block>`
+Rules:
+- Choose the smallest safe line range.
+- START_LINE and END_LINE must exist in ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS.
+- Never invent line numbers.
+- Do not include markdown.
+- Do not include explanation.
+- Do not use unified diff.
+- Do not use FIND/REPLACE.`
             : `Exact File Content is not available.
 Write an advisory implementation draft only.
 Do not claim this is directly applicable.
@@ -1381,32 +1489,92 @@ Latest user intent preview: ${decision.userIntentPreview}`
                     "line_range_find_not_found",
                     "line_range_find_matches_multiple",
                     "line_range_invalid_numbers",
-                    "line_range_out_of_bounds"
+                    "line_range_out_of_bounds",
+                    "file_mismatch"
                 ];
 
                 const needsRetry = shouldRetryQwenDraft(qwenDraftMode, qwenDraftChars) || 
+                    qwenDraftMode === "unified_diff" ||
                     (!patchCheck.ok && failedReasons.includes(patchCheck.reason || ""));
 
                 if (needsRetry) {
                     qwenRetryUsed = true;
                     let retryPrompt = "Your previous answer was not an implementation patch.\nReturn ONLY a unified diff or FIND/REPLACE snippet.\nNo explanation. No notes. Write the actual code now.";
                     
-                    if (!patchCheck.ok && failedReasons.includes(patchCheck.reason || "")) {
-                        if (hasExactOriginalFileContent) {
-                            retryPrompt = `Your previous patch could not be applied.
+                    if (qwenDraftMode === "unified_diff" && hasExactOriginalFileContent) {
+                        retryPrompt = `Your previous answer used unified diff, which is not allowed.
 Return ONLY line-range format.
 
-FILE: <target file path>
+FILE: ${targetFile}
+START_LINE: <number between 1 and ${totalLineCount}>
+END_LINE: <number between START_LINE and ${totalLineCount}>
+REPLACE: <replacement code>
+
+Rules:
+- Use only line numbers that exist in ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS.
+- Choose the smallest safe line range.
+- Do not include line numbers in REPLACE.
+- Do not use FIND/REPLACE.
+- Do not use unified diff.
+- Do not include markdown.
+- Do not explain.`;
+                    } else if (!patchCheck.ok && failedReasons.includes(patchCheck.reason || "")) {
+                        if (hasExactOriginalFileContent) {
+                            if (patchCheck.reason === "line_range_out_of_bounds") {
+                                retryPrompt = `Your previous patch used line numbers outside the file.
+The target file has exactly ${totalLineCount} lines.
+Return ONLY line-range format.
+
+FILE: ${targetFile}
+START_LINE: <number between 1 and ${totalLineCount}>
+END_LINE: <number between START_LINE and ${totalLineCount}>
+REPLACE: <replacement code>
+
+Rules:
+- START_LINE and END_LINE must be between 1 and ${totalLineCount}.
+- Use line numbers from ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS only.
+- Choose the smallest safe line range.
+- Do not include line numbers in REPLACE.
+- Do not use FIND/REPLACE.
+- Do not use unified diff.
+- Do not include markdown.
+- Do not explain.`;
+                            } else if (patchCheck.reason === "file_mismatch") {
+                                retryPrompt = `Your previous patch used the wrong FILE value.
+Return ONLY line-range format.
+
+FILE: ${targetFile}
+START_LINE: <number>
+END_LINE: <number>
+REPLACE: <replacement code>
+
+Rules:
+- FILE must exactly equal ${targetFile}.
+- Use the line numbers from ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS.
+- Choose the smallest safe line range.
+- Do not include line numbers in REPLACE.
+- Do not use FIND/REPLACE.
+- Do not use unified diff.
+- Do not include markdown.
+- Do not explain.`;
+                            } else {
+                                retryPrompt = `Your previous patch could not be applied.
+Return ONLY line-range format.
+
+FILE: ${targetFile}
 START_LINE: <number>
 END_LINE: <number>
 REPLACE: <replacement code>
 
 Rules:
 - Use the line numbers from ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS.
+- Choose the smallest safe line range.
 - Do not include line numbers in REPLACE.
 - Do not use FIND/REPLACE.
 - Do not use unified diff.
+- Do not include markdown.
 - Do not explain.`;
+                            }
                         } else {
                             retryPrompt = `Your previous patch could not be applied by the Gateway.
 Return ONLY FIND/REPLACE format, not unified diff.
@@ -1575,6 +1743,8 @@ Rules:
 
         let finalBody = req.body;
         if (draftText) {
+            const validButNotApproved = qwenPatchValid && !deepseekApprovalApproved;
+            const forwardedDraftText = validButNotApproved ? draftText : draftText.slice(0, 800);
             const advisoryIntro = qwenPatchValid
                 ? `Internal Qwen primary patch draft below.
 
@@ -1586,6 +1756,8 @@ Do not rewrite the solution from scratch unless the draft is clearly wrong, unsa
 
 Gateway validation rejected this draft.
 Fallback reason: ${fallbackReason || qwenPatchReason || "invalid_patch"}.
+Patch mode: ${qwenDraftMode}.
+Only the first 800 chars of the rejected draft are included.
 Treat this only as advisory context. Verify against the actual file context before using it.`;
             const augmentedMessages = [
                 ...req.body.messages,
@@ -1596,23 +1768,24 @@ Treat this only as advisory context. Verify against the actual file context befo
                             type: "text",
                             text: `${advisoryIntro}
 
-Keep your final response minimal.
-Prefer tool_use/Edit over long explanation.
-Do not explain broadly.
+Keep response short.
+Prefer tool_use/Edit only if verified.
+max final explanation 3 bullets.
 If applying a valid Qwen patch, use tools directly.
-After applying, summarize in 1-3 bullets only.
 Do not generate another full implementation unless Qwen draft is wrong.
 
 <QWEN_DRAFT mode="${qwenDraftMode}" chars="${qwenDraftChars}">
-${draftText}
+${forwardedDraftText}
 </QWEN_DRAFT>`
                         }
                     ]
                 }
             ];
+            const originalMaxTokens = typeof req.body.max_tokens === "number" ? req.body.max_tokens : undefined;
             finalBody = {
                 ...req.body,
-                messages: augmentedMessages
+                messages: augmentedMessages,
+                max_tokens: originalMaxTokens === undefined ? 700 : Math.min(originalMaxTokens, 700)
             };
         }
 
