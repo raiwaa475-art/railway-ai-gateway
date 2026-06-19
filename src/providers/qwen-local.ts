@@ -6,10 +6,24 @@ export class QwenLocalProvider implements Provider {
     id = "qwen-local";
 
     resolveUpstreamModel(clientModel?: string): string {
-        return "qwen";
+        return config.qwenLocalModel;
     }
 
     async handleRequest(body: any, headers: Record<string, string>): Promise<Response> {
+        // Translate body.tools to OpenAI tools format
+        const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
+        let openaiTools: any[] | undefined = undefined;
+        if (hasTools) {
+            openaiTools = body.tools.map((t: any) => ({
+                type: "function",
+                function: {
+                    name: t.name,
+                    description: t.description,
+                    parameters: t.input_schema
+                }
+            }));
+        }
+
         // Map messages
         const openaiMessages: any[] = [];
 
@@ -21,31 +35,93 @@ export class QwenLocalProvider implements Provider {
             });
         }
 
-        // Add user/assistant messages
+        // Add user/assistant/tool messages
         if (Array.isArray(body.messages)) {
             for (const msg of body.messages) {
-                let contentStr = "";
                 if (typeof msg.content === "string") {
-                    contentStr = msg.content;
+                    openaiMessages.push({
+                        role: msg.role,
+                        content: msg.content
+                    });
                 } else if (Array.isArray(msg.content)) {
-                    contentStr = msg.content
-                        .map((block: any) => (block?.type === "text" ? block.text : ""))
-                        .join("");
+                    if (msg.role === "assistant") {
+                        let textContent = "";
+                        const toolCalls: any[] = [];
+                        for (const block of msg.content) {
+                            if (block?.type === "text") {
+                                textContent += block.text;
+                            } else if (block?.type === "tool_use") {
+                                toolCalls.push({
+                                    id: block.id,
+                                    type: "function",
+                                    function: {
+                                        name: block.name,
+                                        arguments: typeof block.input === "string" ? block.input : JSON.stringify(block.input)
+                                    }
+                                });
+                            }
+                        }
+                        const openAiMsg: any = { role: "assistant" };
+                        if (textContent) {
+                            openAiMsg.content = textContent;
+                        } else {
+                            openAiMsg.content = null;
+                        }
+                        if (toolCalls.length > 0) {
+                            openAiMsg.tool_calls = toolCalls;
+                        }
+                        openaiMessages.push(openAiMsg);
+                    } else if (msg.role === "user") {
+                        const toolResultBlocks = msg.content.filter((b: any) => b?.type === "tool_result");
+                        const textBlocks = msg.content.filter((b: any) => b?.type === "text");
+
+                        for (const block of toolResultBlocks) {
+                            let resContent = "";
+                            if (typeof block.content === "string") {
+                                resContent = block.content;
+                            } else if (Array.isArray(block.content)) {
+                                resContent = block.content.map((cb: any) => cb?.text || "").join("");
+                            } else if (block.content !== undefined) {
+                                resContent = JSON.stringify(block.content);
+                            }
+                            openaiMessages.push({
+                                role: "tool",
+                                tool_call_id: block.tool_use_id,
+                                content: resContent
+                            });
+                        }
+
+                        if (textBlocks.length > 0) {
+                            openaiMessages.push({
+                                role: "user",
+                                content: textBlocks.map((b: any) => b.text || "").join("")
+                            });
+                        }
+                    } else {
+                        openaiMessages.push({
+                            role: msg.role,
+                            content: msg.content.map((b: any) => b.text || "").join("")
+                        });
+                    }
                 }
-                openaiMessages.push({
-                    role: msg.role,
-                    content: contentStr
-                });
             }
         }
 
-        const openAiBody = {
-            model: body.model || "qwen",
+        // Force stream: false when there are tools
+        const isStream = hasTools ? false : !!body.stream;
+
+        const openAiBody: any = {
+            model: config.qwenLocalModel,
             messages: openaiMessages,
             temperature: body.temperature ?? 0.7,
             max_tokens: body.max_tokens ?? 2048,
-            stream: !!body.stream
+            stream: isStream
         };
+
+        if (hasTools) {
+            openAiBody.tools = openaiTools;
+            openAiBody.tool_choice = "auto";
+        }
 
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 90000); // 90 seconds timeout
@@ -80,7 +156,7 @@ export class QwenLocalProvider implements Provider {
                 return response;
             }
 
-            if (body.stream && response.body) {
+            if (isStream && response.body) {
                 const transformedStream = createOpenAiToAnthropicStream(response.body);
                 return new Response(transformedStream, {
                     status: 200,
@@ -93,24 +169,49 @@ export class QwenLocalProvider implements Provider {
             }
 
             const openAiData = await response.json();
-            const textContent = openAiData.choices?.[0]?.message?.content || "";
+            const message = openAiData.choices?.[0]?.message;
+            const textContent = message?.content || "";
 
             const cleanState = { insideThink: false };
             const cleanedText = cleanText(textContent, cleanState);
+
+            const contentBlocks: any[] = [];
+            if (cleanedText) {
+                contentBlocks.push({
+                    type: "text",
+                    text: cleanedText
+                });
+            }
+
+            let stopReason = "end_turn";
+            if (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) {
+                stopReason = "tool_use";
+                for (const call of message.tool_calls) {
+                    let parsedInput = {};
+                    try {
+                        parsedInput = typeof call.function.arguments === "string"
+                            ? JSON.parse(call.function.arguments)
+                            : call.function.arguments;
+                    } catch {
+                        parsedInput = call.function.arguments;
+                    }
+                    contentBlocks.push({
+                        type: "tool_use",
+                        id: call.id,
+                        name: call.function.name,
+                        input: parsedInput
+                    });
+                }
+            }
 
             const messageId = "msg_local_" + Math.random().toString(36).substring(7);
             const anthropicResponse = {
                 id: messageId,
                 type: "message",
                 role: "assistant",
-                content: [
-                    {
-                        type: "text",
-                        text: cleanedText
-                    }
-                ],
-                model: body.model || "qwen",
-                stop_reason: "end_turn",
+                content: contentBlocks.length > 0 ? contentBlocks : [{ type: "text", text: "" }],
+                model: body.model || "qwen-local",
+                stop_reason: stopReason,
                 stop_sequence: null,
                 usage: {
                     input_tokens: openAiData.usage?.prompt_tokens || 0,

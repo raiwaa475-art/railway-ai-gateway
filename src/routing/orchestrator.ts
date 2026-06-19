@@ -48,7 +48,7 @@ export class OrchestratorService {
             }
 
             const deepseekData = await deepseekRes.json();
-            console.log("[Orchestrator] DeepSeek raw response data:", JSON.stringify(deepseekData));
+            console.log("[Orchestrator] DeepSeek plan response received. Status: ok.");
             const textBlock = Array.isArray(deepseekData.content)
                 ? deepseekData.content.find((block: any) => block?.type === "text")
                 : null;

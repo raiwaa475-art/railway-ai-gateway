@@ -114,7 +114,6 @@ export function createOpenAiToAnthropicStream(openAiStream: ReadableStream<Uint8
                 for (const line of lines) {
                     const trimmed = line.trim();
                     if (!trimmed) continue;
-                    console.log("[StreamHandler] Processing line:", trimmed);
                     if (trimmed === "data: [DONE]") {
                         console.log("[StreamHandler] Received data: [DONE]. Closing controller...");
                         const contentStop = `event: content_block_stop\ndata: ${JSON.stringify({
@@ -157,7 +156,7 @@ export function createOpenAiToAnthropicStream(openAiStream: ReadableStream<Uint8
                                     })}\n\n`;
                                     controller.enqueue(encoder.encode(eventStr));
                                 } else {
-                                    console.log("[StreamHandler] Token discarded by cleanText (e.g. inside think):", JSON.stringify(textDelta));
+                                    // Token inside think tag or discarded
                                 }
                             }
                         } catch (e) {

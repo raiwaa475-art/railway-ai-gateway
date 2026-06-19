@@ -30,5 +30,6 @@ export const config = {
     deepseekApiKey: process.env.DEEPSEEK_API_KEY || "",
     deepseekAnthropicBaseUrl: process.env.DEEPSEEK_ANTHROPIC_BASE_URL || "https://api.deepseek.com/anthropic",
     defaultModel: process.env.DEFAULT_MODEL || "deepseek-v4-flash",
-    qwenLocalApiUrl: process.env.QWEN_LOCAL_API_URL || "http://localhost:11434/v1"
+    qwenLocalApiUrl: process.env.QWEN_LOCAL_API_URL || "http://localhost:11434/v1",
+    qwenLocalModel: process.env.QWEN_LOCAL_MODEL || "qwen2.5-coder-3b-instruct"
 };
