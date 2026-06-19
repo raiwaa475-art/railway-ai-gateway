@@ -74,11 +74,44 @@ export class OrchestratorService {
             throw new Error("DeepSeek provider not registered.");
         }
 
+        // Format a summarized text context instead of sending raw tool loop messages
+        let contextSummary = "";
+        for (const msg of messages.slice(-6)) {
+            if (msg.role === "user") {
+                if (typeof msg.content === "string") {
+                    contextSummary += `User: ${msg.content}\n`;
+                } else if (Array.isArray(msg.content)) {
+                    for (const block of msg.content) {
+                        if (block?.type === "text") {
+                            contextSummary += `User Text: ${block.text}\n`;
+                        } else if (block?.type === "tool_result") {
+                            const resStr = typeof block.content === "string" 
+                                ? block.content 
+                                : JSON.stringify(block.content);
+                            contextSummary += `Tool Result [Use ID: ${block.tool_use_id}]: ${resStr.slice(0, 1000)}\n`;
+                        }
+                    }
+                }
+            } else if (msg.role === "assistant") {
+                if (typeof msg.content === "string") {
+                    contextSummary += `Assistant: ${msg.content}\n`;
+                } else if (Array.isArray(msg.content)) {
+                    for (const block of msg.content) {
+                        if (block?.type === "text") {
+                            contextSummary += `Assistant Text: ${block.text}\n`;
+                        } else if (block?.type === "tool_use") {
+                            contextSummary += `Assistant requested Tool Use: ${block.name} (input: ${JSON.stringify(block.input)})\n`;
+                        }
+                    }
+                }
+            }
+        }
+
         const routerPrompt = `You are the delegation router for a coding gateway.
 Decide whether the current request should call Qwen Local as an internal code draft generator.
 
 Rules:
-- Return JSON only. Do not wrap in markdown blocks, just return raw JSON string.
+- Return raw JSON only. Do not wrap in markdown blocks, do not explain, do not output XML/thought/tool_calls tags.
 - delegate_to_qwen=true only when:
   1. the user wants code to be written, edited, fixed, refactored, or generated
   2. there is enough file/tool context for Qwen to draft a useful patch
@@ -98,10 +131,17 @@ Output format exactly:
   "qwen_instruction": "short instruction for Qwen if delegate_to_qwen is true"
 }`;
 
+        const routerMessages = [
+            {
+                role: "user",
+                content: `Here is the recent conversation state and tool execution context:\n\n${contextSummary}\n\nBased on this context, decide if we should delegate a coding task to Qwen Local.`
+            }
+        ];
+
         const body = {
             model: config.defaultModel,
             system: routerPrompt,
-            messages: messages,
+            messages: routerMessages,
             stream: false,
             max_tokens: 256,
             temperature: 0.1
