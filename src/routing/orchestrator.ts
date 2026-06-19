@@ -303,6 +303,11 @@ function detectQwenDraftMode(text: string): QwenDraftMode {
     return "notes";
 }
 
+function containsUnifiedDiffMarkers(text: string): boolean {
+    const t = String(text || "");
+    return (t.includes("---") && t.includes("+++")) || t.includes("@@");
+}
+
 function isUsableQwenDraft(mode: QwenDraftMode, chars: number): boolean {
     return mode === "unified_diff" ||
         mode === "find_replace" ||
@@ -1494,23 +1499,21 @@ ${rawFileContent}
         const qwenSystemPrompt = hasExactOriginalFileContent
             ? `You are given Exact File Content from the user's coding tool context.
 Use it as the only source of truth.
-Return a patch that can be applied safely.
 
-Return ONLY this format:
-FILE: <target file path>
-START_LINE: <first line number>
-END_LINE: <last line number>
-REPLACE: <replacement code without line numbers>
+Return ONLY this exact format:
 
-Rules:
-- Return ONLY line-range format. Do not return unified diff. Do not use --- +++ @@.
-- Choose the smallest safe line range.
-- START_LINE and END_LINE must exist in ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS.
-- Never invent line numbers.
-- Do not include markdown.
-- Do not include explanation.
-- Do not use unified diff.
-- Do not use FIND/REPLACE.`
+FILE: ${targetFile}
+START_LINE: <number>
+END_LINE: <number>
+REPLACE:
+<replacement code>
+
+No markdown.
+No explanation.
+No unified diff.
+No --- +++ @@.
+No FIND/REPLACE.
+FILE must exactly equal target file.`
             : `Exact File Content is not available.
 Write concise implementation notes only.
 Do not claim this is directly applicable.
@@ -1593,9 +1596,10 @@ Latest user intent preview: ${decision.userIntentPreview}`
                 qwenInputTokens = qwenResult.inputTokens;
                 qwenOutputTokens = qwenResult.outputTokens;
 
+                const qwenUnifiedDiffViolation = hasExactOriginalFileContent && containsUnifiedDiffMarkers(draftText);
                 let patchCheck = hasExactOriginalFileContent
-                    ? (qwenDraftMode === "unified_diff"
-                        ? { ok: false, mode: "unified_diff" as const, reason: "unified_diff" }
+                    ? (qwenUnifiedDiffViolation
+                        ? { ok: false, mode: "invalid" as const, reason: "qwen_format_violation_unified_diff" }
                         : validateQwenPatch(parseQwenFindReplacePatch(draftText, rawFileContent), messages, userIntent, rawFileContent, hasExactOriginalFileContent, fileContextSource))
                     : { ok: false, mode: "invalid" as const, reason: "no_exact_context_advisory_only" };
 
@@ -1618,33 +1622,43 @@ Latest user intent preview: ${decision.userIntentPreview}`
 
                 const needsRetry = hasExactOriginalFileContent && (
                     shouldRetryQwenDraft(qwenDraftMode, qwenDraftChars) ||
-                    qwenDraftMode === "unified_diff" ||
+                    qwenUnifiedDiffViolation ||
                     (!patchCheck.ok && failedReasons.includes(patchCheck.reason || ""))
                 );
 
                 if (needsRetry) {
                     qwenRetryUsed = true;
-                    let retryPrompt = "Your previous answer was not an implementation patch.\nReturn ONLY a unified diff or FIND/REPLACE snippet.\nNo explanation. No notes. Write the actual code now.";
-                    
-                    if (qwenDraftMode === "unified_diff" && hasExactOriginalFileContent) {
-                        retryPrompt = `Your previous answer used unified diff, which is not allowed.
-Return ONLY line-range format.
+                    let retryPrompt = `Your previous answer was not in the required format.
+You must return ONLY FILE / START_LINE / END_LINE / REPLACE.
+Any other format will be rejected.
 
 FILE: ${targetFile}
-START_LINE: <number between 1 and ${totalLineCount}>
-END_LINE: <number between START_LINE and ${totalLineCount}>
-REPLACE: <replacement code>
+START_LINE: <number>
+END_LINE: <number>
+REPLACE:
+<replacement code>
 
-Rules:
-- FILE must exactly equal ${targetFile}.
-- Use only line numbers that exist in ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS.
-- Choose the smallest safe line range.
-- Do not include line numbers in REPLACE.
-- Do not use FIND/REPLACE.
-- Do not use unified diff.
-- Do not use --- +++ @@.
-- Do not include markdown.
-- Do not explain.`;
+No markdown.
+No explanation.
+No FIND/REPLACE.`;
+                    
+                    if (qwenUnifiedDiffViolation && hasExactOriginalFileContent) {
+                        retryPrompt = `Your previous answer used unified diff. That is invalid.
+You must return ONLY FILE / START_LINE / END_LINE / REPLACE.
+Any other format will be rejected.
+
+FILE: ${targetFile}
+START_LINE: <number>
+END_LINE: <number>
+REPLACE:
+<replacement code>
+
+No markdown.
+No explanation.
+No unified diff.
+No --- +++ @@.
+No FIND/REPLACE.
+FILE must exactly equal ${targetFile}.`;
                     } else if (!patchCheck.ok && failedReasons.includes(patchCheck.reason || "")) {
                         if (hasExactOriginalFileContent) {
                             if (patchCheck.reason === "line_range_out_of_bounds") {
@@ -1776,8 +1790,8 @@ Rules:
 
         if (draftText) {
             parsedPatch = hasExactOriginalFileContent
-                ? (qwenDraftMode === "unified_diff"
-                    ? { ok: false, mode: "invalid", reason: "unified_diff" }
+                ? (containsUnifiedDiffMarkers(draftText)
+                    ? { ok: false, mode: "invalid", reason: "qwen_format_violation_unified_diff" }
                     : validateQwenPatch(parseQwenFindReplacePatch(draftText, rawFileContent), messages, userIntent, rawFileContent, hasExactOriginalFileContent, fileContextSource))
                 : { ok: false, mode: "invalid", reason: "no_exact_context_advisory_only" };
             qwenPatchValid = parsedPatch.ok;
@@ -1903,7 +1917,8 @@ Rules:
         let finalBody = req.body;
         if (draftText) {
             const validButNotApproved = qwenPatchValid && !deepseekApprovalApproved;
-            const forwardedDraftText = validButNotApproved && hasExactOriginalFileContent ? draftText : draftText.slice(0, 800);
+            const draftPreviewChars = (fallbackReason || qwenPatchReason) === "qwen_format_violation_unified_diff" ? 300 : 800;
+            const forwardedDraftText = validButNotApproved && hasExactOriginalFileContent ? draftText : draftText.slice(0, draftPreviewChars);
             const advisoryIntro = qwenPatchValid
                 ? `Internal Qwen primary patch draft below.
 
@@ -1916,7 +1931,7 @@ Do not rewrite the solution from scratch unless the draft is clearly wrong, unsa
 Gateway validation rejected this draft.
 Fallback reason: ${fallbackReason || qwenPatchReason || "invalid_patch"}.
 Patch mode: ${qwenDraftMode}.
-Only the first 800 chars of the rejected draft are included.
+Only the first ${draftPreviewChars} chars of the rejected draft are included.
 Treat this only as advisory context. Verify against the actual file context before using it.`;
             const exactContextInstruction = hasExactOriginalFileContent
                 ? "If applying a valid Qwen patch, use tools directly."
