@@ -1,0 +1,12 @@
+@'
+{
+    "model": "deepseek-v4-flash",
+    "max_tokens": 200,
+    "messages": [
+        {
+            "role": "user",
+            "content": "ตอบแค่คำว่า gateway ok"
+        }
+    ]
+}
+'@ | Set-Content -Path body.json -Encoding utf8

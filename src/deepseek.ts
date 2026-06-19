@@ -3,6 +3,23 @@ const DEEPSEEK_ANTHROPIC_BASE_URL =
 
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL || "deepseek-v4-flash";
 
+export function resolveUpstreamModel(clientModel?: string): string {
+    if (clientModel?.startsWith("deepseek")) {
+        return clientModel;
+    }
+    return DEFAULT_MODEL;
+}
+
+export function sanitizeAnthropicResponse(data: any) {
+    if (!data || !Array.isArray(data.content)) {
+        return data;
+    }
+    return {
+        ...data,
+        content: data.content.filter((block: any) => block?.type === "text")
+    };
+}
+
 export async function forwardToDeepSeekAnthropic(body: any, headers: HeadersInit) {
     const apiKey = process.env.DEEPSEEK_API_KEY;
 
@@ -10,12 +27,10 @@ export async function forwardToDeepSeekAnthropic(body: any, headers: HeadersInit
         throw new Error("DEEPSEEK_API_KEY is not configured");
     }
 
+    const resolvedModel = resolveUpstreamModel(body.model);
     const requestBody = {
         ...body,
-
-        // สำคัญ: Claude Code อาจส่ง model เป็น claude-xxx
-        // v0.1 บังคับให้ใช้ DeepSeek model ก่อน
-        model: body.model?.startsWith("deepseek") ? body.model : DEFAULT_MODEL
+        model: resolvedModel
     };
 
     return fetch(`${DEEPSEEK_ANTHROPIC_BASE_URL}/v1/messages`, {
