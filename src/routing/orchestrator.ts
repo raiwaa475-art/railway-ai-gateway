@@ -133,15 +133,17 @@ interface DeterministicRouterDecision {
     usefulCodeContext: boolean;
 }
 
-type QwenDraftMode = "find_replace" | "unified_diff" | "replacement_snippet" | "snippet" | "notes" | "insufficient_context" | "empty";
+type QwenDraftMode = "find_replace" | "unified_diff" | "line_range_replace" | "replacement_snippet" | "snippet" | "notes" | "insufficient_context" | "empty";
 
 interface ParsedQwenPatch {
     ok: boolean;
     filePath?: string;
     find?: string;
     replace?: string;
-    mode: "find_replace" | "unified_diff" | "invalid";
+    mode: "find_replace" | "unified_diff" | "line_range_replace" | "invalid";
     reason?: string;
+    startLine?: number;
+    endLine?: number;
 }
 
 function normalizeNewlines(str: string): string {
@@ -172,6 +174,7 @@ function detectQwenDraftMode(text: string): QwenDraftMode {
     const t = String(text || "").trim();
     if (!t) return "empty";
     if (t.startsWith("INSUFFICIENT_CONTEXT")) return "insufficient_context";
+    if (t.includes("FILE:") && t.includes("START_LINE:") && t.includes("END_LINE:") && t.includes("REPLACE:")) return "line_range_replace";
     if (t.includes("---") && t.includes("+++") && t.includes("@@")) return "unified_diff";
     if (t.includes("FILE:") && t.includes("FIND:") && t.includes("REPLACE:")) return "find_replace";
     if (
@@ -192,6 +195,7 @@ function detectQwenDraftMode(text: string): QwenDraftMode {
 function isUsableQwenDraft(mode: QwenDraftMode, chars: number): boolean {
     return mode === "unified_diff" ||
         mode === "find_replace" ||
+        mode === "line_range_replace" ||
         mode === "replacement_snippet" ||
         (mode === "snippet" && chars >= 200);
 }
@@ -358,13 +362,67 @@ function parseUnifiedDiffPatch(text: string): ParsedQwenPatch {
     };
 }
 
-function parseQwenFindReplacePatch(text: string): ParsedQwenPatch {
+function parseQwenLineRangePatch(text: string, rawFileContent: string): ParsedQwenPatch {
+    let cleaned = normalizeNewlines(text || "");
+    cleaned = cleanMarkdownFences(cleaned);
+    const t = cleaned.trim();
+
+    const fileMatch = t.match(/(?:^|\n)FILE:\s*(.+?)(?=\n)/);
+    const startMatch = t.match(/(?:^|\n)START_LINE:\s*(\d+)/);
+    const endMatch = t.match(/(?:^|\n)END_LINE:\s*(\d+)/);
+    const replaceMarker = "\nREPLACE:";
+    const replaceIndex = t.indexOf(replaceMarker);
+
+    if (!fileMatch || !startMatch || !endMatch || replaceIndex === -1) {
+        return { ok: false, mode: "invalid", reason: "line_range_invalid_numbers" };
+    }
+
+    const filePath = fileMatch[1].trim();
+    const startLine = parseInt(startMatch[1], 10);
+    const endLine = parseInt(endMatch[1], 10);
+    let replace = t.slice(replaceIndex + replaceMarker.length);
+    replace = trimOuterBlankLines(replace);
+
+    if (!filePath) {
+        return { ok: false, mode: "invalid", reason: "missing_file" };
+    }
+    if (isNaN(startLine) || isNaN(endLine) || startLine < 1 || endLine < startLine) {
+        return { ok: false, mode: "invalid", reason: "line_range_invalid_numbers" };
+    }
+
+    if (!rawFileContent) {
+        return { ok: false, mode: "invalid", reason: "no_exact_file_context_advisory_only" };
+    }
+
+    const originalLines = rawFileContent.split("\n");
+    if (endLine > originalLines.length) {
+        return { ok: false, mode: "invalid", reason: "line_range_out_of_bounds" };
+    }
+
+    const find = originalLines.slice(startLine - 1, endLine).join("\n");
+
+    return {
+        ok: true,
+        mode: "line_range_replace",
+        filePath,
+        find,
+        replace,
+        startLine,
+        endLine
+    };
+}
+
+function parseQwenFindReplacePatch(text: string, rawFileContent?: string): ParsedQwenPatch {
     let cleaned = normalizeNewlines(text || "");
     cleaned = cleanMarkdownFences(cleaned);
 
     const t = cleaned.trim();
     if (!t) {
         return { ok: false, mode: "invalid", reason: "empty_patch" };
+    }
+
+    if (t.includes("FILE:") && t.includes("START_LINE:") && t.includes("END_LINE:") && t.includes("REPLACE:")) {
+        return parseQwenLineRangePatch(text, rawFileContent || "");
     }
 
     if (t.includes("---") && t.includes("+++")) {
@@ -410,16 +468,19 @@ function clampNumber(val: number, min: number, max: number): number {
     return Math.min(Math.max(val, min), max);
 }
 
-function getFileContentFromToolResults(messages: any[], targetFilePath: string): string {
-    if (!targetFilePath) return "";
+function getFileContentFromToolResults(messages: any[], targetFilePath: string): { content: string; isExact: boolean } {
+    if (!targetFilePath) return { content: "", isExact: false };
     const targetName = path.basename(targetFilePath).toLowerCase();
 
     for (const msg of messages.slice().reverse()) {
         if (!Array.isArray(msg.content)) continue;
 
         for (const block of msg.content) {
-            if (block?.type === "tool_result" && block.content) {
+            if (block?.type === "tool_result" && block.content !== undefined) {
                 const toolUseId = block.tool_use_id;
+                let isMatch = false;
+                let toolName = "";
+
                 if (toolUseId) {
                     const toolUseMsg = messages.find(m => 
                         Array.isArray(m.content) && 
@@ -427,21 +488,45 @@ function getFileContentFromToolResults(messages: any[], targetFilePath: string):
                     );
                     if (toolUseMsg) {
                         const toolUseBlock = toolUseMsg.content.find((b: any) => b?.type === "tool_use" && b.id === toolUseId);
+                        toolName = toolUseBlock?.name || "";
                         const inputPath = toolUseBlock?.input?.AbsolutePath || toolUseBlock?.input?.file_path || toolUseBlock?.input?.path || "";
                         if (typeof inputPath === "string" && inputPath.toLowerCase().endsWith(targetName)) {
-                            if (typeof block.content === "string") {
-                                return block.content;
-                            }
-                            if (typeof block.content === "object") {
-                                return block.content.text || JSON.stringify(block.content);
-                            }
+                            isMatch = true;
                         }
                     }
+                }
+
+                if (isMatch) {
+                    let rawText = "";
+                    if (typeof block.content === "string") {
+                        rawText = block.content;
+                    } else if (Array.isArray(block.content)) {
+                        rawText = block.content.map((b: any) => {
+                            if (typeof b === "string") return b;
+                            return b?.text || b?.content || JSON.stringify(b);
+                        }).join("\n");
+                    } else if (typeof block.content === "object" && block.content !== null) {
+                        rawText = block.content.text || block.content.content || JSON.stringify(block.content);
+                    }
+
+                    try {
+                        const parsed = JSON.parse(rawText);
+                        if (parsed && typeof parsed === "object") {
+                            rawText = parsed.content || parsed.text || rawText;
+                        }
+                    } catch {}
+
+                    rawText = rawText.replace(/\r\n/g, "\n");
+
+                    const lowerTool = toolName.toLowerCase();
+                    const isExact = lowerTool.includes("view") || lowerTool.includes("read") || lowerTool.includes("show") || lowerTool.includes("get");
+
+                    return { content: rawText, isExact };
                 }
             }
         }
     }
-    return "";
+    return { content: "", isExact: false };
 }
 
 function validateQwenPatch(
@@ -449,7 +534,8 @@ function validateQwenPatch(
     messages: any[],
     userIntent: string,
     rawFileContent: string,
-    hasExactOriginalFileContent: boolean
+    hasExactOriginalFileContent: boolean,
+    source?: string
 ): ParsedQwenPatch {
     if (!patch.ok) return patch;
 
@@ -489,7 +575,7 @@ function validateQwenPatch(
         return { ...patch, ok: false, reason: "blocked_file_path" };
     }
     const findLines = normalizedFind.split("\n");
-    if (findLines.length <= 1) {
+    if (patch.mode !== "line_range_replace" && findLines.length <= 1) {
         return { ...patch, ok: false, reason: "find_block_too_short" };
     }
 
@@ -503,13 +589,20 @@ function validateQwenPatch(
     }
 
     if (!hasExactOriginalFileContent) {
-        return { ...patch, ok: false, reason: "advisory_draft_only_no_exact_context" };
+        return { ...patch, ok: false, reason: source === "tool_result_partial" ? "tool_result_partial_context_advisory_only" : "no_exact_file_context_advisory_only" };
     }
 
     const normalizedFileContent = normalizeNewlines(rawFileContent);
 
     const occurrences = countOccurrences(normalizedFileContent, normalizedFind);
     if (occurrences !== 1) {
+        if (patch.mode === "line_range_replace") {
+            return {
+                ...patch,
+                ok: false,
+                reason: occurrences === 0 ? "line_range_find_not_found" : "line_range_find_matches_multiple"
+            };
+        }
         return {
             ...patch,
             ok: false,
@@ -1115,22 +1208,23 @@ Expected JSON shape:
 
         const targetFile = getTargetFileFromRecentToolUse(messages);
         let rawFileContent = "";
-        let source = "reduced_context";
+        let source: "disk" | "tool_result_exact" | "tool_result_partial" | "reduced_context" = "reduced_context";
 
         if (targetFile) {
             if (fs.existsSync(targetFile)) {
                 try {
                     rawFileContent = fs.readFileSync(targetFile, "utf-8");
-                    source = "disk_or_tool_file_content";
+                    source = "disk";
                 } catch (e) {
                     console.error("Failed to read raw target file content for Qwen prompt", e);
                 }
             }
             if (!rawFileContent) {
                 // Try to extract from previous tool results
-                rawFileContent = getFileContentFromToolResults(messages, targetFile);
-                if (rawFileContent) {
-                    source = "disk_or_tool_file_content";
+                const extracted = getFileContentFromToolResults(messages, targetFile);
+                if (extracted.content) {
+                    rawFileContent = extracted.content;
+                    source = extracted.isExact ? "tool_result_exact" : "tool_result_partial";
                 }
             }
         }
@@ -1140,9 +1234,46 @@ Expected JSON shape:
             source = "reduced_context";
         }
 
-        const hasExactOriginalFileContent = rawFileContent.length > 0 && source === "disk_or_tool_file_content";
+        const hasExactOriginalFileContent = rawFileContent.length > 0 && (source === "disk" || source === "tool_result_exact");
 
-        const qwenSystemPrompt = `Use ONLY the TARGET_FILE.
+        let originalContentBlock = "";
+        if (hasExactOriginalFileContent) {
+            const lines = rawFileContent.split("\n");
+            const numberedLines = lines.map((line, idx) => `${idx + 1}| ${line}`).join("\n");
+            originalContentBlock = `ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS:
+\`\`\`
+${numberedLines}
+\`\`\``;
+        } else {
+            originalContentBlock = `ORIGINAL_FILE_CONTENT of ${targetFile}:
+\`\`\`
+${rawFileContent}
+\`\`\``;
+        }
+
+        const qwenSystemPrompt = hasExactOriginalFileContent
+            ? `Use ONLY ORIGINAL_FILE_CONTENT.
+Preferred format:
+FILE: <target file path>
+START_LINE: <first line number to replace>
+END_LINE: <last line number to replace>
+REPLACE: <replacement code>
+
+Rules:
+- START_LINE and END_LINE must refer to the provided ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS.
+- Replace the smallest safe block.
+- Include enough full block/function context.
+- Line numbers are for START_LINE/END_LINE only and must NOT be included in REPLACE.
+- Do NOT use unified diff unless explicitly requested.
+- Do NOT explain.
+
+Fallback format if line numbers are impossible:
+FILE: <target file path>
+FIND:
+<exact original block copied from ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS without line numbers>
+REPLACE:
+<replacement block>`
+            : `Use ONLY the TARGET_FILE.
 Return exactly one FIND/REPLACE patch.
 Do NOT return unified diff.
 Do NOT use --- +++ @@.
@@ -1183,10 +1314,7 @@ REPLACE:
                             role: "user",
                             content: `TARGET_FILE: ${targetFile}
 
-ORIGINAL_FILE_CONTENT of ${targetFile}:
-\`\`\`
-${rawFileContent}
-\`\`\`
+${originalContentBlock}
 
 Reduced context:
 ${reducedContext}
@@ -1227,17 +1355,48 @@ Latest user intent preview: ${decision.userIntentPreview}`
                 qwenInputTokens = qwenResult.inputTokens;
                 qwenOutputTokens = qwenResult.outputTokens;
 
-                let patchCheck = validateQwenPatch(parseQwenFindReplacePatch(draftText), messages, userIntent, rawFileContent, hasExactOriginalFileContent);
+                let patchCheck = validateQwenPatch(parseQwenFindReplacePatch(draftText, rawFileContent), messages, userIntent, rawFileContent, hasExactOriginalFileContent, source);
+
+                const failedReasons = [
+                    "patch_parse_unsupported",
+                    "patch_parse_failed",
+                    "find_block_too_short",
+                    "replace_too_large",
+                    "missing_file_find_or_replace",
+                    "empty_patch",
+                    "not_parsed",
+                    "find_block_not_found_in_context",
+                    "line_range_find_not_found",
+                    "line_range_find_matches_multiple",
+                    "line_range_invalid_numbers",
+                    "line_range_out_of_bounds"
+                ];
 
                 const needsRetry = shouldRetryQwenDraft(qwenDraftMode, qwenDraftChars) || 
-                    (!patchCheck.ok && ["patch_parse_unsupported", "patch_parse_failed", "find_block_too_short", "replace_too_large", "missing_file_find_or_replace", "empty_patch", "not_parsed"].includes(patchCheck.reason || ""));
+                    (!patchCheck.ok && failedReasons.includes(patchCheck.reason || ""));
 
                 if (needsRetry) {
                     qwenRetryUsed = true;
                     let retryPrompt = "Your previous answer was not an implementation patch.\nReturn ONLY a unified diff or FIND/REPLACE snippet.\nNo explanation. No notes. Write the actual code now.";
                     
-                    if (!patchCheck.ok && ["patch_parse_unsupported", "patch_parse_failed", "find_block_too_short", "replace_too_large", "missing_file_find_or_replace", "empty_patch", "not_parsed"].includes(patchCheck.reason || "")) {
-                        retryPrompt = `Your previous patch could not be applied by the Gateway.
+                    if (!patchCheck.ok && failedReasons.includes(patchCheck.reason || "")) {
+                        if (hasExactOriginalFileContent) {
+                            retryPrompt = `Your previous patch could not be applied.
+Return ONLY line-range format.
+
+FILE: <target file path>
+START_LINE: <number>
+END_LINE: <number>
+REPLACE: <replacement code>
+
+Rules:
+- Use the line numbers from ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS.
+- Do not include line numbers in REPLACE.
+- Do not use FIND/REPLACE.
+- Do not use unified diff.
+- Do not explain.`;
+                        } else {
+                            retryPrompt = `Your previous patch could not be applied by the Gateway.
 Return ONLY FIND/REPLACE format, not unified diff.
 
 Required format:
@@ -1253,6 +1412,7 @@ Rules:
 - FIND must contain enough surrounding context.
 - If changing a large block, include a larger FIND block so REPLACE is not more than 3x FIND.
 - Do not explain.`;
+                        }
                     }
 
                     qwenResult = await callQwen(retryPrompt);
@@ -1286,7 +1446,7 @@ Rules:
         }
 
         if (draftText) {
-            parsedPatch = validateQwenPatch(parseQwenFindReplacePatch(draftText), messages, userIntent, rawFileContent, hasExactOriginalFileContent);
+            parsedPatch = validateQwenPatch(parseQwenFindReplacePatch(draftText, rawFileContent), messages, userIntent, rawFileContent, hasExactOriginalFileContent, source);
             qwenPatchValid = parsedPatch.ok;
             qwenPatchReason = parsedPatch.reason || (parsedPatch.ok ? "valid" : "invalid_patch");
         } else {
@@ -1310,9 +1470,13 @@ Rules:
                     fallbackReason = `approval_rejected:${approval.reason}`;
                 } else {
                     if (qwenRetryUsed) {
-                        fallbackReason = "retry_find_replace_success";
+                        fallbackReason = parsedPatch.mode === "line_range_replace" ? "retry_line_range_success" : "retry_find_replace_success";
+                    } else if (parsedPatch.mode === "line_range_replace") {
+                        fallbackReason = "line_range_replace";
                     } else if (parsedPatch.mode === "unified_diff") {
                         fallbackReason = "unified_diff_converted_to_find_replace";
+                    } else if (source === "tool_result_exact") {
+                        fallbackReason = "tool_result_exact_context_used";
                     }
                 }
             } else {

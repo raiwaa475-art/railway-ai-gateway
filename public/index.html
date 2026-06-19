@@ -485,7 +485,14 @@
                         if (call.qwen_patch_valid === true) draftFlags.push('valid');
                         if (call.deepseek_approval_approved === true) draftFlags.push('approved');
                         if (call.emitted_tool_use) draftFlags.push(call.emitted_tool_use);
-                        if (call.fallback_reason) draftFlags.push(`fallback:${call.fallback_reason}`);
+                        if (call.fallback_reason) {
+                             const fr = call.fallback_reason;
+                             if (fr.startsWith("retry_") || fr.startsWith("unified_diff_") || fr === "line_range_replace" || fr.startsWith("tool_result_exact_")) {
+                                 draftFlags.push(fr);
+                             } else {
+                                 draftFlags.push(`fallback:${fr}`);
+                             }
+                        }
                         const patchMode = call.qwen_patch_mode || draftMode;
                         const draftSuffix = draftFlags.length ? ` ${draftFlags.join(', ')}` : '';
                         const draft = patchMode !== '-' ? `${patchMode} (${draftChars.toLocaleString()})${draftSuffix}` : '-';
