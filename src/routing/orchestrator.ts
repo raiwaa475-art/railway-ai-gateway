@@ -57,14 +57,36 @@ function extractJsonFromString(str: string): any {
 }
 
 function extractJsonObject(text: string): any {
-    const start = text.indexOf("{");
-    const end = text.lastIndexOf("}");
+    const cleaned = String(text || "")
+        .replace(/```json/gi, "```")
+        .replace(/```/g, "")
+        .trim();
+
+    const start = cleaned.indexOf("{");
+    const end = cleaned.lastIndexOf("}");
 
     if (start === -1 || end === -1 || end <= start) {
         throw new Error("No JSON object found");
     }
 
-    return JSON.parse(text.slice(start, end + 1));
+    const jsonText = cleaned.slice(start, end + 1);
+    return JSON.parse(jsonText);
+}
+
+function getTextFromAnthropicResponse(data: any): string {
+    if (!data) return "";
+
+    if (typeof data === "string") return data;
+
+    if (Array.isArray(data.content)) {
+        return data.content
+            .filter((block: any) => block?.type === "text")
+            .map((block: any) => block.text || "")
+            .join("\n")
+            .trim();
+    }
+
+    return "";
 }
 
 interface RouterDecision {
@@ -72,6 +94,26 @@ interface RouterDecision {
     task_type: string;
     reason: string;
     qwen_instruction: string;
+}
+
+function fallbackDelegationFromText(text: string): RouterDecision {
+    const compact = String(text || "").replace(/\s+/g, "");
+
+    if (compact.includes('"delegate_to_qwen":true')) {
+        return {
+            delegate_to_qwen: true,
+            task_type: "code_edit",
+            reason: "Recovered from router text fallback",
+            qwen_instruction: "Draft a concise patch or implementation suggestion from the provided reduced context."
+        };
+    }
+
+    return {
+        delegate_to_qwen: false,
+        task_type: "unknown",
+        reason: "Router parse failed",
+        qwen_instruction: ""
+    };
 }
 
 export class OrchestratorService {
@@ -122,11 +164,13 @@ export class OrchestratorService {
 Decide whether the current request should call Qwen Local as an internal code draft generator.
 
 Rules:
-- Return ONLY one valid minified JSON object.
+- Return ONLY one valid JSON object.
 - No markdown.
-- No explanation.
 - No code fence.
+- No explanation.
 - No text before or after JSON.
+- Do not include reasoning.
+- Do not include comments.
 - delegate_to_qwen=true only when:
   1. the user wants code to be written, edited, fixed, refactored, or generated
   2. there is enough file/tool context for Qwen to draft a useful patch
@@ -138,8 +182,13 @@ Rules:
   - the task is architecture/planning/review only
   - tool context is missing or insufficient
 
-Output format exactly:
-{"delegate_to_qwen":boolean,"task_type":"chat|read|explain|code_edit|debug|test|review|unknown","reason":"short reason","qwen_instruction":"short instruction for Qwen if delegate_to_qwen is true"}`;
+Expected JSON shape:
+{
+  "delegate_to_qwen": true,
+  "task_type": "code_edit",
+  "reason": "short reason",
+  "qwen_instruction": "short instruction for Qwen"
+}`;
 
         const routerMessages = [
             {
@@ -165,31 +214,25 @@ Output format exactly:
             throw new Error(`Delegation router request failed with status ${res.status}`);
         }
 
-        const data = await res.json();
-        let text = "";
-        if (Array.isArray(data.content)) {
-            const textBlock = data.content.find((b: any) => b?.type === "text") ||
-                              data.content.find((b: any) => b?.type === "thinking");
-            text = textBlock?.text || textBlock?.thinking || "";
-        }
+        const routerData = await res.json();
+        const routerText = getTextFromAnthropicResponse(routerData);
 
         let decision: RouterDecision;
         try {
-            decision = extractJsonObject(text);
+            decision = extractJsonObject(routerText);
         } catch (err) {
-            console.error(JSON.stringify({
-                time: new Date().toISOString(),
+            console.error("Delegation router parse failed", {
                 requestId,
                 routerParseFailed: true,
-                responsePreview: text.slice(0, 120)
-            }));
-            throw err;
+                responsePreview: routerText.slice(0, 160)
+            });
+            decision = fallbackDelegationFromText(routerText);
         }
 
         // Log delegation router model call
-        const inputTokens = data.usage?.input_tokens || 0;
-        const outputTokens = data.usage?.output_tokens || 0;
-        const cacheReadTokens = data.usage?.cache_read_input_tokens || 0;
+        const inputTokens = routerData.usage?.input_tokens || 0;
+        const outputTokens = routerData.usage?.output_tokens || 0;
+        const cacheReadTokens = routerData.usage?.cache_read_input_tokens || 0;
 
         await insertModelCall({
             requestId,
