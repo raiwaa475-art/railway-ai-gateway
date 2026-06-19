@@ -1,7 +1,8 @@
 import type { Request, Response, NextFunction } from "express";
+import { config } from "./config/env.js";
 
 export function authMiddleware(req: Request, res: Response, next: NextFunction) {
-    const expectedKey = process.env.GATEWAY_API_KEY;
+    const expectedKey = config.gatewayApiKey;
 
     if (!expectedKey) {
         return res.status(500).json({
