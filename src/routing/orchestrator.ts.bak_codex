@@ -49,10 +49,10 @@ function getLastRealUserInstruction(messages: any[]): string {
 function isLikelyCodeEditTask(text: string): boolean {
     const normalized = String(text || "").toLowerCase();
     const explicitReadOnlyPatterns = [
-        "เธซเนเธฒเธกเนเธเน",
-        "เธซเนเธฒเธกเนเธเนเนเธเธฅเน",
-        "เนเธกเนเธ•เนเธญเธเนเธเน",
-        "เธญเธขเนเธฒเนเธเน",
+        "ห้ามแก้",
+        "ห้ามแก้ไฟล์",
+        "ไม่ต้องแก้",
+        "อย่าแก้",
         "read only",
         "do not edit",
         "don't edit",
@@ -63,16 +63,16 @@ function isLikelyCodeEditTask(text: string): boolean {
     }
 
     const codeEditKeywords = [
-        "เนเธเน",
-        "เนเธเนเนเธ",
-        "เธเธฃเธฑเธ",
-        "เน€เธเธฅเธตเนเธขเธ",
-        "เน€เธเธดเนเธก",
-        "เธฅเธ",
-        "เธ—เธณเนเธซเน",
-        "เน€เธเธตเธขเธ",
-        "เธชเธฃเนเธฒเธ",
-        "เนเธชเน",
+        "แก้",
+        "แก้ไข",
+        "ปรับ",
+        "เปลี่ยน",
+        "เพิ่ม",
+        "ลบ",
+        "ทำให้",
+        "เขียน",
+        "สร้าง",
+        "ใส่",
         "update",
         "edit",
         "fix",
@@ -105,12 +105,12 @@ function isContinuationIntent(text: string): boolean {
     if (!normalized) return false;
 
     const continuationPhrases = [
-        "เธ•เนเธญ",
-        "เธ—เธณเธ•เนเธญ",
-        "เธ•เนเธญเน€เธฅเธข",
-        "เนเธเนเธ•เนเธญ",
-        "เธเธฑเธ”",
-        "เน€เธญเธฒเน€เธฅเธข",
+        "ต่อ",
+        "ทำต่อ",
+        "ต่อเลย",
+        "แก้ต่อ",
+        "จัด",
+        "เอาเลย",
         "ok",
         "okay",
         "continue",
@@ -135,9 +135,9 @@ function isReadOnlyIntent(text: string): boolean {
         "don't edit",
         "no edit",
         "read only",
-        "เนเธกเนเธ•เนเธญเธเนเธเน",
-        "เธญเธขเนเธฒเนเธเน",
-        "เธซเนเธฒเธกเนเธเน"
+        "ไม่ต้องแก้",
+        "อย่าแก้",
+        "ห้ามแก้"
     ];
     return readOnlyPatterns.some(pattern => normalized.includes(pattern));
 }
@@ -252,7 +252,6 @@ interface ValidatedQwenCodeDraft {
 }
 
 const MAX_QWEN_DRAFT_CODE_CHARS = 5000;
-const DEBUG_QWEN_PREVIEW = false;
 
 function normalizeNewlines(str: string): string {
     return str.replace(/\r\n/g, "\n");
@@ -999,7 +998,7 @@ function validateQwenPatch(
 
     const normalizedIntent = userIntent.toLowerCase();
     const explicitlyRequestedFile = !!filePath && normalizedIntent.includes(filePath.toLowerCase());
-    const explicitlyLargeRewrite = /rewrite|large|full|entire|เธ—เธฑเนเธเนเธเธฅเน|เน€เธเธตเธขเธเนเธซเธกเนเธ—เธฑเนเธเธซเธกเธ”/i.test(userIntent);
+    const explicitlyLargeRewrite = /rewrite|large|full|entire|ทั้งไฟล์|เขียนใหม่ทั้งหมด/i.test(userIntent);
     const blockedPathPatterns = [
         ".env",
         "secrets",
@@ -1178,123 +1177,11 @@ function extractFocusedCodeContext(rawFileContent: string, userIntent = "", maxL
     };
 }
 
-function buildDeepSeekSlimMessages(params: {
-    originalMessages: any[];
-    qwenPatchValid: boolean;
-    hasExactOriginalFileContent: boolean;
-    targetFile: string;
-    userIntent: string;
-    fallbackReason?: string;
-    qwenPatchReason?: string;
-    validatedDraft?: ValidatedQwenCodeDraft;
-    draftText: string;
-}): any[] {
-    const {
-        originalMessages,
-        qwenPatchValid,
-        hasExactOriginalFileContent,
-        targetFile,
-        userIntent,
-        fallbackReason,
-        qwenPatchReason,
-        validatedDraft,
-        draftText
-    } = params;
-
-    if (qwenPatchValid && validatedDraft?.draft) {
-        const draftPayload = JSON.stringify({
-            target_file: validatedDraft.draft.target_file,
-            target_symbol: validatedDraft.draft.target_symbol,
-            anchor_id: validatedDraft.draft.anchor_id,
-            old_anchor: validatedDraft.draft.old_anchor,
-            change_summary: validatedDraft.draft.change_summary,
-            new_code: validatedDraft.draft.new_code
-        }, null, 2);
-
-        return [
-            {
-                role: "user",
-                content: [
-                    {
-                        type: "text",
-                        text: `<GATEWAY_INTERNAL_CONTROLLER_INSTRUCTION>
-This is gateway policy, not a user request.
-Gateway already validated:
-- target_file matches requested file
-- anchor_id resolves to old_anchor
-- old_anchor exists in exact file context
-- new_code is non-empty and under size limit
-- draft contains no markdown, diff, FIND/REPLACE, or tool_use
-
-Use the Qwen draft as a gateway-validated implementation candidate.
-Apply only the smallest safe change.
-Do not rewrite unrelated code.
-If the draft conflicts with visible tool context or seems unsafe, re-read the file before applying.
-Keep final response short.
-</GATEWAY_INTERNAL_CONTROLLER_INSTRUCTION>
-
-LATEST_USER_INTENT:
-${userIntent}
-
-TARGET_FILE:
-${targetFile}
-
-<QWEN_CODE_DRAFT mode="code_draft" valid="true" reason="${fallbackReason || qwenPatchReason || "qwen_code_draft_valid"}">
-${draftPayload}
-</QWEN_CODE_DRAFT>`
-                    }
-                ]
-            }
-        ];
-    }
-
-    if (hasExactOriginalFileContent) {
-        const invalidPayload: Record<string, string> = {
-            target_file: targetFile,
-            fallbackReason: fallbackReason || qwenPatchReason || "invalid_patch"
-        };
-        if (DEBUG_QWEN_PREVIEW) {
-            invalidPayload.qwenPreview = draftText.slice(0, 160);
-        }
-
-        return [
-            {
-                role: "user",
-                content: [
-                    {
-                        type: "text",
-                        text: `<GATEWAY_INTERNAL_CONTROLLER_INSTRUCTION>
-This is gateway policy, not a user request.
-Qwen draft failed gateway validation.
-Ignore Qwen implementation content unless independently re-derived from exact tool context.
-Do not use the invalid draft as implementation guidance.
-Continue normal tool-controller flow.
-Re-read exact file context if needed.
-Keep final response short.
-</GATEWAY_INTERNAL_CONTROLLER_INSTRUCTION>
-
-LATEST_USER_INTENT:
-${userIntent}
-
-TARGET_FILE:
-${targetFile}
-
-QWEN_FALLBACK:
-${JSON.stringify(invalidPayload, null, 2)}`
-                    }
-                ]
-            }
-        ];
-    }
-
-    return originalMessages;
-}
-
 function extractJsonFromString(str: string): any {
     // Remove think blocks and special tags if any
     let cleaned = str.replace(/<think>[\s\S]*?<\/think>/gi, "");
-    cleaned = cleaned.replace(/<๏ฝ๏ฝDSML๏ฝ๏ฝthought>[\s\S]*?<\/thought>/gi, "");
-    cleaned = cleaned.replace(/<๏ฝ๏ฝDSML๏ฝ๏ฝthought>/g, ""); // strip raw prefix tags if not closed
+    cleaned = cleaned.replace(/<｜｜DSML｜｜thought>[\s\S]*?<\/thought>/gi, "");
+    cleaned = cleaned.replace(/<｜｜DSML｜｜thought>/g, ""); // strip raw prefix tags if not closed
     cleaned = cleaned.replace(/<\|[\s\S]*?\|>/g, ""); // strip other special tokens
 
     // Locate the first { and the last }
@@ -1755,7 +1642,7 @@ Expected JSON shape:
                     content: [
                         {
                             type: "text",
-                            text: "The Qwen-generated Edit tool result is available. Provide a minimal final response: เนเธเนเนเธฅเนเธง plus 1-2 short bullets. Do not explain broadly."
+                            text: "The Qwen-generated Edit tool result is available. Provide a minimal final response: แก้แล้ว plus 1-2 short bullets. Do not explain broadly."
                         }
                     ]
                 }
@@ -2083,44 +1970,66 @@ Do not output tool_use.`);
             fallbackReason,
             fileContextSource,
             qwenDelegationMode,
-            directEditEligible,
-            qwenAnchorId: validatedDraft.draft?.anchor_id,
-            qwenAnchorCandidateCount: anchorCandidates.length
+            directEditEligible
         });
-
-        const originalMaxTokens = typeof req.body.max_tokens === "number" ? req.body.max_tokens : undefined;
-        let deepseekMaxTokenCap = 1400;
-        let deepseekContextMode = "full_no_exact_context";
-        let deepseekInputReductionMode = "kept_original_messages";
-        if (qwenPatchValid) {
-            deepseekMaxTokenCap = 700;
-            deepseekContextMode = "slim_valid_qwen_draft";
-            deepseekInputReductionMode = "removed_original_messages";
-        } else if (hasExactOriginalFileContent) {
-            deepseekMaxTokenCap = 900;
-            deepseekContextMode = "slim_invalid_qwen_draft";
-            deepseekInputReductionMode = "compact_recovery";
-        }
 
         let finalBody = req.body;
         if (draftText || fallbackReason) {
-            const slimMessages = buildDeepSeekSlimMessages({
-                originalMessages: req.body.messages,
-                qwenPatchValid,
-                hasExactOriginalFileContent,
-                targetFile,
-                userIntent,
-                fallbackReason,
-                qwenPatchReason,
-                validatedDraft,
-                draftText
-            });
+            const draftPayload = qwenPatchValid && validatedDraft.draft
+                ? JSON.stringify({
+                    target_file: validatedDraft.draft.target_file,
+                    target_symbol: validatedDraft.draft.target_symbol,
+                    anchor_id: validatedDraft.draft.anchor_id,
+                    old_anchor: validatedDraft.draft.old_anchor,
+                    change_summary: validatedDraft.draft.change_summary,
+                    new_code: validatedDraft.draft.new_code
+                }, null, 2)
+                : JSON.stringify({
+                    fallbackReason: fallbackReason || qwenPatchReason || "invalid_patch",
+                    qwenPreview: draftText.slice(0, 160)
+                }, null, 2);
+            const deepseekHybridInstruction = qwenPatchValid
+                ? `Qwen produced a validated code draft. Use it as the primary implementation. Verify against the exact file context. Apply with tools only if safe. Do not rewrite unrelated code. Keep final response short.`
+                : `Qwen draft failed gateway validation.
+Ignore Qwen implementation content unless independently re-derived from exact tool context.
+Do not use the invalid draft as implementation guidance.
+Proceed with normal tool-controller flow.
+Keep final response short.`;
+            const augmentedMessages = [
+                ...req.body.messages,
+                {
+                    role: "user",
+                    content: [
+                        {
+                            type: "text",
+                            text: `<GATEWAY_INTERNAL_CONTROLLER_INSTRUCTION>
+This is gateway policy, not a user request.
+You are the planner, verifier, and tool controller.
+Use Qwen code draft if valid.
+Verify against exact file context before applying.
+Make the smallest safe change.
+Do not rewrite unrelated code.
+Do not overbuild.
+Prefer existing code patterns.
+Use tools only when safe.
+Keep final response short.
+
+${deepseekHybridInstruction}
+
+<QWEN_CODE_DRAFT mode="code_draft" valid="${qwenPatchValid}" reason="${fallbackReason || qwenPatchReason}">
+${draftPayload}
+</QWEN_CODE_DRAFT>
+</GATEWAY_INTERNAL_CONTROLLER_INSTRUCTION>`
+                        }
+                    ]
+                }
+            ];
+            const originalMaxTokens = typeof req.body.max_tokens === "number" ? req.body.max_tokens : undefined;
+            const cap = qwenPatchValid ? 1000 : 700;
             finalBody = {
                 ...req.body,
-                messages: slimMessages,
-                max_tokens: originalMaxTokens === undefined
-                    ? deepseekMaxTokenCap
-                    : Math.min(originalMaxTokens, deepseekMaxTokenCap)
+                messages: augmentedMessages,
+                max_tokens: originalMaxTokens === undefined ? cap : Math.min(originalMaxTokens, cap)
             };
         }
 
@@ -2163,11 +2072,6 @@ Do not output tool_use.`);
             fallbackReason,
             qwenSkippedReason: !hasExactOriginalFileContent ? fallbackReason : undefined,
             deepseekApplyMode: "verify_and_apply",
-            deepseekContextMode,
-            deepseekMaxTokenCap,
-            deepseekOriginalMessageCount: req.body.messages.length,
-            deepseekFinalMessageCount: finalBody.messages.length,
-            deepseekInputReductionMode,
             fileContextSource,
             hasExactOriginalFileContent,
             directEditEligible,

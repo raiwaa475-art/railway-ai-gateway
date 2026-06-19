@@ -64,7 +64,9 @@ export async function initDb() {
                 fallback_reason VARCHAR(255),
                 file_context_source VARCHAR(50),
                 qwen_delegation_mode VARCHAR(50),
-                direct_edit_eligible BOOLEAN
+                direct_edit_eligible BOOLEAN,
+                qwen_anchor_id VARCHAR(32),
+                qwen_anchor_candidate_count INTEGER
             );
         `);
 
@@ -122,6 +124,8 @@ export async function initDb() {
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS file_context_source VARCHAR(50);`);
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS qwen_delegation_mode VARCHAR(50);`);
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS direct_edit_eligible BOOLEAN;`);
+        await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS qwen_anchor_id VARCHAR(32);`);
+        await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS qwen_anchor_candidate_count INTEGER;`);
 
         console.log("Database tables initialized successfully.");
     } catch (err) {
@@ -188,6 +192,8 @@ export async function insertModelCall(params: {
     fileContextSource?: string;
     qwenDelegationMode?: string;
     directEditEligible?: boolean;
+    qwenAnchorId?: string;
+    qwenAnchorCandidateCount?: number;
 }) {
     if (!pool) return;
     try {
@@ -219,7 +225,9 @@ export async function insertModelCall(params: {
             pricingSource,
             fileContextSource,
             qwenDelegationMode,
-            directEditEligible
+            directEditEligible,
+            qwenAnchorId,
+            qwenAnchorCandidateCount
         } = params;
 
         let inputCostUsd = params.inputCostUsd || 0;
@@ -246,8 +254,8 @@ export async function insertModelCall(params: {
 
         await pool.query(
             `INSERT INTO model_calls 
-            (request_id, provider, model, input_tokens, output_tokens, cache_hit_input_tokens, cache_miss_input_tokens, latency_ms, cost_usd, cost_thb, saved_usd, saved_thb, input_cost_usd, input_cost_thb, output_cost_usd, output_cost_thb, saved_input_usd, saved_input_thb, saved_output_usd, saved_output_thb, qwen_draft_mode, qwen_draft_chars, qwen_draft_weak, qwen_retry_used, qwen_patch_mode, qwen_patch_valid, deepseek_approval_approved, emitted_tool_use, fallback_reason, input_cache_hit_cost_usd, input_cache_miss_cost_usd, pricing_model, pricing_source, file_context_source, qwen_delegation_mode, direct_edit_eligible) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36)`,
+            (request_id, provider, model, input_tokens, output_tokens, cache_hit_input_tokens, cache_miss_input_tokens, latency_ms, cost_usd, cost_thb, saved_usd, saved_thb, input_cost_usd, input_cost_thb, output_cost_usd, output_cost_thb, saved_input_usd, saved_input_thb, saved_output_usd, saved_output_thb, qwen_draft_mode, qwen_draft_chars, qwen_draft_weak, qwen_retry_used, qwen_patch_mode, qwen_patch_valid, deepseek_approval_approved, emitted_tool_use, fallback_reason, input_cache_hit_cost_usd, input_cache_miss_cost_usd, pricing_model, pricing_source, file_context_source, qwen_delegation_mode, direct_edit_eligible, qwen_anchor_id, qwen_anchor_candidate_count) 
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38)`,
             [
                 requestId,
                 provider,
@@ -284,7 +292,9 @@ export async function insertModelCall(params: {
                 pricingSource || null,
                 fileContextSource || null,
                 qwenDelegationMode || null,
-                directEditEligible ?? null
+                directEditEligible ?? null,
+                qwenAnchorId || null,
+                qwenAnchorCandidateCount ?? null
             ]
         );
     } catch (err) {

@@ -783,7 +783,7 @@ gatewayRouter.post("/v1/messages", authMiddleware, async (req, res) => {
 });
 
 // Admin Usage Summary & Recent Endpoints
-gatewayRouter.get("/admin/usage/summary", authMiddleware, async (req, res) => {
+gatewayRouter.get("/admin/usage/summary", adminAuthMiddleware, async (req, res) => {
     const range = req.query.range;
     let timeFilter = "";
     if (range === "today") {
@@ -883,7 +883,7 @@ gatewayRouter.get("/admin/usage/summary", authMiddleware, async (req, res) => {
     }
 });
 
-gatewayRouter.get("/admin/usage/recent", authMiddleware, async (req, res) => {
+gatewayRouter.get("/admin/usage/recent", adminAuthMiddleware, async (req, res) => {
     const limit = Math.min(Number(req.query.limit || 50), 100);
     if (!pool) {
         return res.json([]);
@@ -899,7 +899,7 @@ gatewayRouter.get("/admin/usage/recent", authMiddleware, async (req, res) => {
     }
 });
 
-gatewayRouter.post("/admin/usage/clear", authMiddleware, async (req, res) => {
+gatewayRouter.post("/admin/usage/clear", adminAuthMiddleware, async (req, res) => {
     if (!pool) {
         return res.json({ ok: false, error: "Database not connected" });
     }
