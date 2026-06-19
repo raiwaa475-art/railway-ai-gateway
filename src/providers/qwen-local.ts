@@ -1,6 +1,7 @@
 import { config } from "../config/env.js";
 import { Provider } from "./base.js";
 import { createOpenAiToAnthropicStream, cleanText } from "../utils/stream-handler.js";
+import { ProviderStore } from "../utils/provider-store.js";
 
 export class QwenLocalProvider implements Provider {
     id = "qwen-local";
@@ -10,6 +11,22 @@ export class QwenLocalProvider implements Provider {
     }
 
     async handleRequest(body: any, headers: Record<string, string>): Promise<Response> {
+        let apiUrl = config.qwenLocalApiUrl;
+        let modelName = config.qwenLocalModel;
+        let authHeader = "Bearer local-dummy-key";
+
+        try {
+            const allProviders = await ProviderStore.getAllProviders();
+            const active = allProviders.find(p => p.enabled && (p.type === "ollama" || p.type === "lmstudio" || p.type === "openai_compatible"));
+            if (active) {
+                apiUrl = active.openaiBaseUrl;
+                modelName = active.defaultModel || modelName;
+                authHeader = active.type === "ollama" ? "Bearer ollama" : `Bearer ${active.apiKey || ""}`;
+            }
+        } catch (e) {
+            console.error("Failed to query dynamic provider inside QwenLocalProvider:", e);
+        }
+
         // Translate body.tools to OpenAI tools format
         const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
         let openaiTools: any[] | undefined = undefined;
@@ -111,7 +128,7 @@ export class QwenLocalProvider implements Provider {
         const isStream = hasTools ? false : !!body.stream;
 
         const openAiBody: any = {
-            model: config.qwenLocalModel,
+            model: modelName,
             messages: openaiMessages,
             temperature: body.temperature ?? 0.7,
             max_tokens: body.max_tokens ?? 2048,
@@ -127,12 +144,12 @@ export class QwenLocalProvider implements Provider {
         const timeoutId = setTimeout(() => controller.abort(), 90000); // 90 seconds timeout
 
         try {
-            const url = `${config.qwenLocalApiUrl}/chat/completions`;
+            const url = `${apiUrl}/chat/completions`;
             const response = await fetch(url, {
                 method: "POST",
                 headers: {
                     "content-type": "application/json",
-                    "authorization": `Bearer local-dummy-key`,
+                    "authorization": authHeader,
                     ...headers
                 },
                 body: JSON.stringify(openAiBody),
