@@ -1,5 +1,7 @@
 import { Request, Response as ExpressResponse } from "express";
 import crypto from "crypto";
+import fs from "fs";
+import path from "path";
 import { providerRegistry } from "./registry.js";
 import { DeepSeekProvider } from "../providers/deepseek.js";
 import { QwenLocalProvider } from "../providers/qwen-local.js";
@@ -141,6 +143,30 @@ interface ParsedQwenPatch {
     reason?: string;
 }
 
+function normalizeNewlines(str: string): string {
+    return str.replace(/\r\n/g, "\n");
+}
+
+function cleanMarkdownFences(text: string): string {
+    return text
+        .split("\n")
+        .filter(line => !line.trim().startsWith("```"))
+        .join("\n");
+}
+
+function trimOuterBlankLines(str: string): string {
+    const lines = str.split("\n");
+    let start = 0;
+    while (start < lines.length && lines[start].trim() === "") {
+        start++;
+    }
+    let end = lines.length - 1;
+    while (end >= start && lines[end].trim() === "") {
+        end--;
+    }
+    return lines.slice(start, end + 1).join("\n");
+}
+
 function detectQwenDraftMode(text: string): QwenDraftMode {
     const t = String(text || "").trim();
     if (!t) return "empty";
@@ -259,7 +285,10 @@ function countOccurrences(haystack: string, needle: string): number {
 }
 
 function parseQwenFindReplacePatch(text: string): ParsedQwenPatch {
-    const t = String(text || "").trim();
+    let cleaned = normalizeNewlines(text || "");
+    cleaned = cleanMarkdownFences(cleaned);
+
+    const t = cleaned.trim();
     if (!t) {
         return { ok: false, mode: "invalid", reason: "empty_patch" };
     }
@@ -284,8 +313,11 @@ function parseQwenFindReplacePatch(text: string): ParsedQwenPatch {
     }
 
     const filePath = fileMatch[1].trim();
-    const find = t.slice(findIndex + findMarker.length, replaceIndex).trim();
-    const replace = t.slice(replaceIndex + replaceMarker.length).trim();
+    let find = t.slice(findIndex + findMarker.length, replaceIndex);
+    let replace = t.slice(replaceIndex + replaceMarker.length);
+
+    find = trimOuterBlankLines(find);
+    replace = trimOuterBlankLines(replace);
 
     return {
         ok: true,
@@ -307,7 +339,10 @@ function validateQwenPatch(
     const find = patch.find || "";
     const replace = patch.replace || "";
     const targetFile = getTargetFileFromRecentToolUse(messages);
-    const context = getRecentToolResultText(messages);
+
+    const normalizedFind = normalizeNewlines(find);
+    const normalizedReplace = normalizeNewlines(replace);
+
     const normalizedIntent = userIntent.toLowerCase();
     const explicitlyRequestedFile = !!filePath && normalizedIntent.includes(filePath.toLowerCase());
     const explicitlyLargeRewrite = /rewrite|large|full|entire|ทั้งไฟล์|เขียนใหม่ทั้งหมด/i.test(userIntent);
@@ -339,12 +374,38 @@ function validateQwenPatch(
         return { ...patch, ok: false, reason: "replace_too_large" };
     }
 
-    const occurrences = countOccurrences(context, find);
-    if (occurrences !== 1) {
-        return { ...patch, ok: false, reason: occurrences === 0 ? "find_not_in_context" : "find_not_unique" };
+    const findLines = normalizedFind.split("\n");
+    if (findLines.length <= 1) {
+        return { ...patch, ok: false, reason: "find_block_single_line" };
     }
 
-    return patch;
+    let rawFileContent = "";
+    try {
+        if (fs.existsSync(filePath)) {
+            rawFileContent = fs.readFileSync(filePath, "utf-8");
+        } else {
+            return { ...patch, ok: false, reason: "file_not_found_on_disk" };
+        }
+    } catch (e: any) {
+        return { ...patch, ok: false, reason: `read_file_error:${e.message}` };
+    }
+
+    const normalizedFileContent = normalizeNewlines(rawFileContent);
+
+    const occurrences = countOccurrences(normalizedFileContent, normalizedFind);
+    if (occurrences !== 1) {
+        return {
+            ...patch,
+            ok: false,
+            reason: occurrences === 0 ? "find_not_in_raw_file" : "find_not_unique_in_raw_file"
+        };
+    }
+
+    return {
+        ...patch,
+        find: normalizedFind,
+        replace: normalizedReplace
+    };
 }
 
 function extractReducedContext(messages: any[], userIntent = "", maxChars = 8000): string {
@@ -912,41 +973,29 @@ Expected JSON shape:
         const reducedContext = extractReducedContext(messages, userIntent);
         const reducedContextChars = reducedContext.length;
 
-        const qwenSystemPrompt = `You are the primary code patch writer.
-You do not control tools.
-You do not ask to read files.
-Use only the provided reduced context.
-Your job is to write the actual implementation patch.
+        const targetFile = getTargetFileFromRecentToolUse(messages);
+        let rawFileContent = "";
+        if (targetFile && fs.existsSync(targetFile)) {
+            try {
+                rawFileContent = fs.readFileSync(targetFile, "utf-8");
+            } catch (e) {
+                console.error("Failed to read raw target file content for Qwen prompt", e);
+            }
+        }
 
-Prefer FIND/REPLACE for this version.
-Return ONLY one of these formats:
-
-A) FIND/REPLACE, preferred:
-FILE: path/to/file
+        const qwenSystemPrompt = `Use ONLY the TARGET_FILE.
+Return exactly one FIND/REPLACE patch in the format:
+FILE: <target file path>
 FIND:
-<exact old snippet>
+<exact code block to find>
 REPLACE:
-<exact new snippet>
+<exact replacement code block>
 
-B) Unified diff, only if FIND/REPLACE is not possible:
---- path/to/file
-+++ path/to/file
-@@
-- old code
-+ new code
-
-Rules:
-- Do not explain.
-- Do not write notes.
-- Do not write planning text.
-- Do not use markdown fences.
-- Do not say "you should".
-- Actually write the code change.
-- Keep the patch minimal.
-- Preserve existing style.
-- Only modify what the user requested.
-- If there is not enough context, return:
-  INSUFFICIENT_CONTEXT: <short reason>`;
+The FIND block must be copied exactly from ORIGINAL_FILE_CONTENT.
+Preserve whitespace and indentation.
+Use 5–20 surrounding lines in FIND so it matches exactly once.
+Do not edit multiple files.
+Do not explain.`;
 
         let qwenDraftUsed = false;
         let qwenErrorType: string | undefined = undefined;
@@ -974,7 +1023,19 @@ Rules:
                     messages: [
                         {
                             role: "user",
-                            content: `Reduced context:\n${reducedContext}\n\nTask: Generate the primary implementation patch for this code edit request.\n\nLatest user intent preview: ${decision.userIntentPreview}`
+                            content: `TARGET_FILE: ${targetFile}
+
+ORIGINAL_FILE_CONTENT of ${targetFile}:
+\`\`\`
+${rawFileContent}
+\`\`\`
+
+Reduced context:
+${reducedContext}
+
+Task: Generate the primary implementation patch for this code edit request.
+
+Latest user intent preview: ${decision.userIntentPreview}`
                         }
                     ],
                     stream: false,
