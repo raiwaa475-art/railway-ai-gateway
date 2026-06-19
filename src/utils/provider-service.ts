@@ -38,12 +38,16 @@ export class ProviderService {
         serverUrl: string;
         apiKey?: string;
     }): Promise<{ ok: boolean; message: string }> {
-        const validation = validateProviderUrl(params.serverUrl);
+        let serverUrl = params.serverUrl.trim();
+        if (serverUrl.endsWith("/")) {
+            serverUrl = serverUrl.slice(0, -1);
+        }
+
+        const validation = validateProviderUrl(serverUrl);
         if (!validation.ok) {
             return { ok: false, message: validation.message || "Invalid URL" };
         }
 
-        const serverUrl = params.serverUrl.trim();
         const type = params.type;
         const apiKey = params.apiKey || "";
 
@@ -87,7 +91,10 @@ export class ProviderService {
     }
 
     static async fetchModels(provider: AiProviderConfig): Promise<Omit<AiModelConfig, "providerId">[]> {
-        const serverUrl = provider.serverUrl.trim();
+        let serverUrl = provider.serverUrl.trim();
+        if (serverUrl.endsWith("/")) {
+            serverUrl = serverUrl.slice(0, -1);
+        }
         const type = provider.type;
         const apiKey = provider.apiKey || "";
 
@@ -97,7 +104,8 @@ export class ProviderService {
         if (type === "ollama") {
             fetchUrl = `${serverUrl}/api/tags`;
         } else {
-            fetchUrl = `${provider.openaiBaseUrl || (serverUrl + "/v1")}/models`;
+            const cleanOpenAiBaseUrl = provider.openaiBaseUrl ? (provider.openaiBaseUrl.endsWith("/") ? provider.openaiBaseUrl.slice(0, -1) : provider.openaiBaseUrl) : `${serverUrl}/v1`;
+            fetchUrl = `${cleanOpenAiBaseUrl}/models`;
             if (apiKey) {
                 headers["authorization"] = `Bearer ${apiKey}`;
             }

@@ -101,7 +101,10 @@ export class ProviderStore {
     }
 
     static async saveProvider(provider: Omit<AiProviderConfig, "id"> & { id?: number }): Promise<AiProviderConfig> {
-        const serverUrl = provider.serverUrl.trim();
+        let serverUrl = provider.serverUrl.trim();
+        if (serverUrl.endsWith("/")) {
+            serverUrl = serverUrl.slice(0, -1);
+        }
         const type = provider.type;
         let openaiBaseUrl = provider.openaiBaseUrl || "";
         let nativeBaseUrl = provider.nativeBaseUrl || null;
