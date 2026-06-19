@@ -10,10 +10,13 @@ export class QwenLocalProvider implements Provider {
         return config.qwenLocalModel;
     }
 
-    async handleRequest(body: any, headers: Record<string, string>): Promise<Response> {
+    async resolveRuntimeConfig(): Promise<{ apiUrl: string; modelName: string; authHeader: string; timeoutMs: number; providerId?: string; providerType?: string }> {
         let apiUrl = config.qwenLocalApiUrl;
         let modelName = config.qwenLocalModel;
         let authHeader = "Bearer local-dummy-key";
+        let timeoutMs = config.qwenLocalTimeoutMs || 180000;
+        let providerId: string | undefined = undefined;
+        let providerType: string | undefined = undefined;
 
         try {
             const allProviders = await ProviderStore.getAllProviders();
@@ -22,10 +25,23 @@ export class QwenLocalProvider implements Provider {
                 apiUrl = active.openaiBaseUrl;
                 modelName = active.defaultModel || modelName;
                 authHeader = active.type === "ollama" ? "Bearer ollama" : `Bearer ${active.apiKey || ""}`;
+                timeoutMs = active.timeoutMs || timeoutMs;
+                providerId = active.id.toString();
+                providerType = active.type;
             }
         } catch (e) {
-            console.error("Failed to query dynamic provider inside QwenLocalProvider:", e);
+            console.error("Failed to query dynamic provider config in QwenLocalProvider:", e);
         }
+
+        return { apiUrl, modelName, authHeader, timeoutMs, providerId, providerType };
+    }
+
+    async handleRequest(body: any, headers: Record<string, string>): Promise<Response> {
+        const runtimeConfig = await this.resolveRuntimeConfig();
+        const apiUrl = runtimeConfig.apiUrl;
+        const modelName = runtimeConfig.modelName;
+        const authHeader = runtimeConfig.authHeader;
+        const timeoutMs = Math.min(Math.max(runtimeConfig.timeoutMs, 30000), 300000);
 
         // Translate body.tools to OpenAI tools format
         const hasTools = Array.isArray(body.tools) && body.tools.length > 0;
@@ -141,7 +157,7 @@ export class QwenLocalProvider implements Provider {
         }
 
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 90000); // 90 seconds timeout
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
         try {
             const url = `${apiUrl}/chat/completions`;

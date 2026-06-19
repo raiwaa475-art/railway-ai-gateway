@@ -328,10 +328,50 @@ function parseQwenFindReplacePatch(text: string): ParsedQwenPatch {
     };
 }
 
+function clampNumber(val: number, min: number, max: number): number {
+    return Math.min(Math.max(val, min), max);
+}
+
+function getFileContentFromToolResults(messages: any[], targetFilePath: string): string {
+    if (!targetFilePath) return "";
+    const targetName = path.basename(targetFilePath).toLowerCase();
+
+    for (const msg of messages.slice().reverse()) {
+        if (!Array.isArray(msg.content)) continue;
+
+        for (const block of msg.content) {
+            if (block?.type === "tool_result" && block.content) {
+                const toolUseId = block.tool_use_id;
+                if (toolUseId) {
+                    const toolUseMsg = messages.find(m => 
+                        Array.isArray(m.content) && 
+                        m.content.some((b: any) => b?.type === "tool_use" && b.id === toolUseId)
+                    );
+                    if (toolUseMsg) {
+                        const toolUseBlock = toolUseMsg.content.find((b: any) => b?.type === "tool_use" && b.id === toolUseId);
+                        const inputPath = toolUseBlock?.input?.AbsolutePath || toolUseBlock?.input?.file_path || toolUseBlock?.input?.path || "";
+                        if (typeof inputPath === "string" && inputPath.toLowerCase().endsWith(targetName)) {
+                            if (typeof block.content === "string") {
+                                return block.content;
+                            }
+                            if (typeof block.content === "object") {
+                                return block.content.text || JSON.stringify(block.content);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return "";
+}
+
 function validateQwenPatch(
     patch: ParsedQwenPatch,
     messages: any[],
-    userIntent: string
+    userIntent: string,
+    rawFileContent: string,
+    hasExactOriginalFileContent: boolean
 ): ParsedQwenPatch {
     if (!patch.ok) return patch;
 
@@ -376,18 +416,11 @@ function validateQwenPatch(
 
     const findLines = normalizedFind.split("\n");
     if (findLines.length <= 1) {
-        return { ...patch, ok: false, reason: "find_block_single_line" };
+        return { ...patch, ok: false, reason: "find_block_too_short" };
     }
 
-    let rawFileContent = "";
-    try {
-        if (fs.existsSync(filePath)) {
-            rawFileContent = fs.readFileSync(filePath, "utf-8");
-        } else {
-            return { ...patch, ok: false, reason: "file_not_found_on_disk" };
-        }
-    } catch (e: any) {
-        return { ...patch, ok: false, reason: `read_file_error:${e.message}` };
+    if (!hasExactOriginalFileContent) {
+        return { ...patch, ok: false, reason: "no_exact_file_context_advisory_only" };
     }
 
     const normalizedFileContent = normalizeNewlines(rawFileContent);
@@ -397,7 +430,7 @@ function validateQwenPatch(
         return {
             ...patch,
             ok: false,
-            reason: occurrences === 0 ? "find_not_in_raw_file" : "find_not_unique_in_raw_file"
+            reason: occurrences === 0 ? "find_block_not_found_in_context" : "find_block_matches_multiple"
         };
     }
 
@@ -969,19 +1002,42 @@ Expected JSON shape:
             return;
         }
 
+        const resolvedConfig = await qwenProvider.resolveRuntimeConfig();
+        const activeModelName = resolvedConfig.modelName;
+        const qwenMaxTokens = clampNumber(config.qwenLocalMaxTokens ?? 32000, 512, 32000);
+
         const userIntent = getLastRealUserInstruction(messages);
         const reducedContext = extractReducedContext(messages, userIntent);
         const reducedContextChars = reducedContext.length;
 
         const targetFile = getTargetFileFromRecentToolUse(messages);
         let rawFileContent = "";
-        if (targetFile && fs.existsSync(targetFile)) {
-            try {
-                rawFileContent = fs.readFileSync(targetFile, "utf-8");
-            } catch (e) {
-                console.error("Failed to read raw target file content for Qwen prompt", e);
+        let source = "reduced_context";
+
+        if (targetFile) {
+            if (fs.existsSync(targetFile)) {
+                try {
+                    rawFileContent = fs.readFileSync(targetFile, "utf-8");
+                    source = "disk_or_tool_file_content";
+                } catch (e) {
+                    console.error("Failed to read raw target file content for Qwen prompt", e);
+                }
+            }
+            if (!rawFileContent) {
+                // Try to extract from previous tool results
+                rawFileContent = getFileContentFromToolResults(messages, targetFile);
+                if (rawFileContent) {
+                    source = "disk_or_tool_file_content";
+                }
             }
         }
+
+        if (!rawFileContent) {
+            rawFileContent = reducedContext;
+            source = "reduced_context";
+        }
+
+        const hasExactOriginalFileContent = rawFileContent.length > 0 && source === "disk_or_tool_file_content";
 
         const qwenSystemPrompt = `Use ONLY the TARGET_FILE.
 Return exactly one FIND/REPLACE patch in the format:
@@ -1039,7 +1095,7 @@ Latest user intent preview: ${decision.userIntentPreview}`
                         }
                     ],
                     stream: false,
-                    max_tokens: 2048,
+                    max_tokens: qwenMaxTokens,
                     temperature: 0.15
                 };
                 const qwenRes = await qwenProvider.handleRequest(qwenBody, clientHeaders);
@@ -1069,9 +1125,28 @@ Latest user intent preview: ${decision.userIntentPreview}`
                 qwenInputTokens = qwenResult.inputTokens;
                 qwenOutputTokens = qwenResult.outputTokens;
 
-                if (shouldRetryQwenDraft(qwenDraftMode, qwenDraftChars)) {
+                let patchCheck = validateQwenPatch(parseQwenFindReplacePatch(draftText), messages, userIntent, rawFileContent, hasExactOriginalFileContent);
+
+                if (shouldRetryQwenDraft(qwenDraftMode, qwenDraftChars) || (!patchCheck.ok && patchCheck.reason === "find_block_too_short")) {
                     qwenRetryUsed = true;
-                    qwenResult = await callQwen("Your previous answer was not an implementation patch.\nReturn ONLY a unified diff or FIND/REPLACE snippet.\nNo explanation. No notes. Write the actual code now.");
+                    let retryPrompt = "Your previous answer was not an implementation patch.\nReturn ONLY a unified diff or FIND/REPLACE snippet.\nNo explanation. No notes. Write the actual code now.";
+                    if (!patchCheck.ok && patchCheck.reason === "find_block_too_short") {
+                        retryPrompt = `Your previous FIND block was too short.
+Return ONLY this format:
+FILE: <target file path>
+FIND:
+<copy exactly 5 to 20 consecutive lines from ORIGINAL_FILE_CONTENT>
+REPLACE:
+<replacement code>
+
+Rules:
+- FIND must contain at least 5 non-empty lines.
+- FIND must exist exactly once in ORIGINAL_FILE_CONTENT.
+- Do not use a single-line FIND.
+- Do not explain.`;
+                    }
+
+                    qwenResult = await callQwen(retryPrompt);
                     qwenLatencyMs = Date.now() - qwenStartTime;
                     if (qwenResult.ok) {
                         draftText = qwenResult.text;
@@ -1097,16 +1172,16 @@ Latest user intent preview: ${decision.userIntentPreview}`
             }
         } catch (error: any) {
             qwenLatencyMs = Date.now() - qwenStartTime;
-            qwenErrorType = error.name === "AbortError" ? "timeout" : "connection_error";
+            qwenErrorType = error.name === "AbortError" ? "qwen_timeout" : "qwen_connection_error";
             qwenDraftWeak = true;
         }
 
         if (draftText) {
-            parsedPatch = validateQwenPatch(parseQwenFindReplacePatch(draftText), messages, userIntent);
+            parsedPatch = validateQwenPatch(parseQwenFindReplacePatch(draftText), messages, userIntent, rawFileContent, hasExactOriginalFileContent);
             qwenPatchValid = parsedPatch.ok;
             qwenPatchReason = parsedPatch.reason || (parsedPatch.ok ? "valid" : "invalid_patch");
         } else {
-            qwenPatchReason = qwenErrorType || "empty_draft";
+            qwenPatchReason = qwenErrorType || "qwen_output_empty";
         }
 
         if (qwenPatchValid && parsedPatch.filePath && parsedPatch.find !== undefined && parsedPatch.replace !== undefined) {
@@ -1131,13 +1206,13 @@ Latest user intent preview: ${decision.userIntentPreview}`
         } else if (draftText) {
             fallbackReason = qwenPatchReason;
         } else {
-            fallbackReason = qwenErrorType || "empty_draft";
+            fallbackReason = qwenErrorType || "qwen_output_empty";
         }
 
         await insertModelCall({
             requestId,
             provider: "qwen-local",
-            model: config.qwenLocalModel,
+            model: activeModelName,
             inputTokens: qwenInputTokens,
             outputTokens: qwenOutputTokens,
             latencyMs: qwenLatencyMs,

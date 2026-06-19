@@ -39,5 +39,7 @@ export const config = {
     deepseekOutputUsdPer1M: Number(process.env.DEEPSEEK_OUTPUT_USD_PER_1M || 1.10),
     gatewayAdminKey: process.env.GATEWAY_ADMIN_KEY || "",
     allowPrivateProviderUrl: process.env.ALLOW_PRIVATE_PROVIDER_URL === "true",
-    defaultProviderId: process.env.DEFAULT_PROVIDER_ID || ""
+    defaultProviderId: process.env.DEFAULT_PROVIDER_ID || "",
+    qwenLocalMaxTokens: Number(process.env.QWEN_LOCAL_MAX_TOKENS || 32000),
+    qwenLocalTimeoutMs: Number(process.env.QWEN_LOCAL_TIMEOUT_MS || 180000)
 };
