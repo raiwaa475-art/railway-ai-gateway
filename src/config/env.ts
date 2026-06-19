@@ -41,5 +41,6 @@ export const config = {
     allowPrivateProviderUrl: process.env.ALLOW_PRIVATE_PROVIDER_URL === "true",
     defaultProviderId: process.env.DEFAULT_PROVIDER_ID || "",
     qwenLocalMaxTokens: Number(process.env.QWEN_LOCAL_MAX_TOKENS || 32000),
-    qwenLocalTimeoutMs: Number(process.env.QWEN_LOCAL_TIMEOUT_MS || 180000)
+    qwenLocalTimeoutMs: Number(process.env.QWEN_LOCAL_TIMEOUT_MS || 180000),
+    allowRailwayDiskFileContext: process.env.ALLOW_RAILWAY_DISK_FILE_CONTEXT === "true"
 };

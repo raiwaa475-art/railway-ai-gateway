@@ -9,6 +9,13 @@ import { config } from "../config/env.js";
 import { insertModelCall, updateGatewayRequest } from "../utils/db.js";
 import { extractDeepSeekUsage, calculateDeepSeekCost } from "../utils/pricing.js";
 
+type FileContextSource =
+    | "tool_result_exact"
+    | "tool_result_partial"
+    | "disk_exact"
+    | "reduced_context"
+    | "none";
+
 function hasToolResults(messages: any[]): boolean {
     return messages.some(msg => {
         if (!Array.isArray(msg.content)) return false;
@@ -589,7 +596,15 @@ function validateQwenPatch(
     }
 
     if (!hasExactOriginalFileContent) {
-        return { ...patch, ok: false, reason: source === "tool_result_partial" ? "tool_result_partial_context_advisory_only" : "no_exact_file_context_advisory_only" };
+        let reason = "no_exact_file_context_advisory_only";
+        if (source === "tool_result_partial") {
+            reason = "tool_result_partial_context_advisory_only";
+        } else if (source === "reduced_context") {
+            reason = "reduced_context_advisory_only";
+        } else if (source === "none") {
+            reason = "no_workspace_file_on_gateway";
+        }
+        return { ...patch, ok: false, reason };
     }
 
     const normalizedFileContent = normalizeNewlines(rawFileContent);
@@ -1208,33 +1223,44 @@ Expected JSON shape:
 
         const targetFile = getTargetFileFromRecentToolUse(messages);
         let rawFileContent = "";
-        let source: "disk" | "tool_result_exact" | "tool_result_partial" | "reduced_context" = "reduced_context";
+        let fileContextSource: FileContextSource = "none";
 
         if (targetFile) {
-            if (fs.existsSync(targetFile)) {
-                try {
-                    rawFileContent = fs.readFileSync(targetFile, "utf-8");
-                    source = "disk";
-                } catch (e) {
-                    console.error("Failed to read raw target file content for Qwen prompt", e);
+            // 1. First try extracting exact file content from tool_result / Read result / message context
+            const extracted = getFileContentFromToolResults(messages, targetFile);
+            if (extracted.content && extracted.isExact) {
+                rawFileContent = extracted.content;
+                fileContextSource = "tool_result_exact";
+            }
+
+            // 2. Only try fs.existsSync/readFileSync as fallback if ALLOW_RAILWAY_DISK_FILE_CONTEXT is enabled
+            if (!rawFileContent && config.allowRailwayDiskFileContext) {
+                if (fs.existsSync(targetFile)) {
+                    try {
+                        rawFileContent = fs.readFileSync(targetFile, "utf-8");
+                        fileContextSource = "disk_exact";
+                    } catch (e) {
+                        console.error("Failed to read raw target file content for Qwen prompt", e);
+                    }
                 }
             }
-            if (!rawFileContent) {
-                // Try to extract from previous tool results
-                const extracted = getFileContentFromToolResults(messages, targetFile);
-                if (extracted.content) {
-                    rawFileContent = extracted.content;
-                    source = extracted.isExact ? "tool_result_exact" : "tool_result_partial";
-                }
+
+            // 3. Fallback to partial tool result if exact not found
+            if (!rawFileContent && extracted.content) {
+                rawFileContent = extracted.content;
+                fileContextSource = "tool_result_partial";
             }
         }
 
+        // 4. Fallback to reduced context
         if (!rawFileContent) {
             rawFileContent = reducedContext;
-            source = "reduced_context";
+            fileContextSource = reducedContext ? "reduced_context" : "none";
         }
 
-        const hasExactOriginalFileContent = rawFileContent.length > 0 && (source === "disk" || source === "tool_result_exact");
+        const hasExactOriginalFileContent = rawFileContent.length > 0 && (fileContextSource === "tool_result_exact" || fileContextSource === "disk_exact");
+        const directEditEligible = hasExactOriginalFileContent;
+        const qwenDelegationMode = directEditEligible ? "patch_draft" : "advisory_draft";
 
         let originalContentBlock = "";
         if (hasExactOriginalFileContent) {
@@ -1245,46 +1271,32 @@ Expected JSON shape:
 ${numberedLines}
 \`\`\``;
         } else {
-            originalContentBlock = `ORIGINAL_FILE_CONTENT of ${targetFile}:
+            originalContentBlock = `ORIGINAL_FILE_CONTENT of ${targetFile || "unknown"}:
 \`\`\`
 ${rawFileContent}
 \`\`\``;
         }
 
         const qwenSystemPrompt = hasExactOriginalFileContent
-            ? `Use ONLY ORIGINAL_FILE_CONTENT.
+            ? `You are given Exact File Content from the user's coding tool context.
+Use it as the only source of truth.
+Return a patch that can be applied safely.
+
 Preferred format:
 FILE: <target file path>
-START_LINE: <first line number to replace>
-END_LINE: <last line number to replace>
-REPLACE: <replacement code>
+START_LINE: <first line number>
+END_LINE: <last line number>
+REPLACE: <replacement code without line numbers>
 
-Rules:
-- START_LINE and END_LINE must refer to the provided ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS.
-- Replace the smallest safe block.
-- Include enough full block/function context.
-- Line numbers are for START_LINE/END_LINE only and must NOT be included in REPLACE.
-- Do NOT use unified diff unless explicitly requested.
-- Do NOT explain.
-
-Fallback format if line numbers are impossible:
+If line range is not possible, return:
 FILE: <target file path>
-FIND:
-<exact original block copied from ORIGINAL_FILE_CONTENT_WITH_LINE_NUMBERS without line numbers>
-REPLACE:
-<replacement block>`
-            : `Use ONLY the TARGET_FILE.
-Return exactly one FIND/REPLACE patch.
-Do NOT return unified diff.
-Do NOT use --- +++ @@.
-Do NOT explain.
-
-Format:
-FILE: <target file path>
-FIND:
-<exact original block>
-REPLACE:
-<replacement block>`;
+FIND: <exact original block copied from Exact File Content>
+REPLACE: <replacement block>`
+            : `Exact File Content is not available.
+Write an advisory implementation draft only.
+Do not claim this is directly applicable.
+Do not output Edit tool instructions.
+Return concise code-oriented guidance or a patch draft for DeepSeek/Claude Code to verify.`;
 
         let qwenDraftUsed = false;
         let qwenErrorType: string | undefined = undefined;
@@ -1355,7 +1367,7 @@ Latest user intent preview: ${decision.userIntentPreview}`
                 qwenInputTokens = qwenResult.inputTokens;
                 qwenOutputTokens = qwenResult.outputTokens;
 
-                let patchCheck = validateQwenPatch(parseQwenFindReplacePatch(draftText, rawFileContent), messages, userIntent, rawFileContent, hasExactOriginalFileContent, source);
+                let patchCheck = validateQwenPatch(parseQwenFindReplacePatch(draftText, rawFileContent), messages, userIntent, rawFileContent, hasExactOriginalFileContent, fileContextSource);
 
                 const failedReasons = [
                     "patch_parse_unsupported",
@@ -1446,7 +1458,7 @@ Rules:
         }
 
         if (draftText) {
-            parsedPatch = validateQwenPatch(parseQwenFindReplacePatch(draftText, rawFileContent), messages, userIntent, rawFileContent, hasExactOriginalFileContent, source);
+            parsedPatch = validateQwenPatch(parseQwenFindReplacePatch(draftText, rawFileContent), messages, userIntent, rawFileContent, hasExactOriginalFileContent, fileContextSource);
             qwenPatchValid = parsedPatch.ok;
             qwenPatchReason = parsedPatch.reason || (parsedPatch.ok ? "valid" : "invalid_patch");
         } else {
@@ -1475,8 +1487,10 @@ Rules:
                         fallbackReason = "line_range_replace";
                     } else if (parsedPatch.mode === "unified_diff") {
                         fallbackReason = "unified_diff_converted_to_find_replace";
-                    } else if (source === "tool_result_exact") {
+                    } else if (fileContextSource === "tool_result_exact") {
                         fallbackReason = "tool_result_exact_context_used";
+                    } else if (fileContextSource === "disk_exact") {
+                        fallbackReason = "railway_disk_context_used_dev_only";
                     }
                 }
             } else {
@@ -1503,7 +1517,10 @@ Rules:
             qwenPatchValid,
             deepseekApprovalApproved: deepseekApprovalUsed ? deepseekApprovalApproved : undefined,
             emittedToolUse: deepseekApprovalApproved ? "Edit" : undefined,
-            fallbackReason
+            fallbackReason,
+            fileContextSource,
+            qwenDelegationMode,
+            directEditEligible
         });
 
         if (qwenPatchValid && deepseekApprovalApproved && parsedPatch.filePath && parsedPatch.find !== undefined && parsedPatch.replace !== undefined) {
@@ -1522,7 +1539,11 @@ Rules:
                 deepseekApprovalUsed,
                 deepseekApprovalApproved,
                 finalProvider: "deepseek",
-                emittedToolUse
+                emittedToolUse,
+                fileContextSource,
+                hasExactOriginalFileContent,
+                directEditEligible,
+                qwenDelegationMode
             }));
             await updateGatewayRequest(requestId, 200, qwenLatencyMs);
             res.status(200).json({
@@ -1619,7 +1640,11 @@ ${draftText}
             reason: decision.reason,
             finalProvider: "deepseek",
             emittedToolUse,
-            fallbackReason
+            fallbackReason,
+            fileContextSource,
+            hasExactOriginalFileContent,
+            directEditEligible,
+            qwenDelegationMode
         }));
 
         const qwenSavings = qwenDraftUsed ? { inputTokens: qwenInputTokens, outputTokens: qwenOutputTokens } : undefined;
