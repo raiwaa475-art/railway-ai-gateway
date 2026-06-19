@@ -25,6 +25,7 @@ const port = config.port;
 
 // Use Gateway Router
 app.use("/", gatewayRouter);
+app.use("/v1", gatewayRouter);
 
 // Fallback 404 middleware
 app.use((_req, res) => {
