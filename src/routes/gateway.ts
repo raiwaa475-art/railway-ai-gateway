@@ -11,6 +11,7 @@ import { config } from "../config/env.js";
 import { ProviderStore } from "../utils/provider-store.js";
 import { ProviderService } from "../utils/provider-service.js";
 import { createOpenAiToAnthropicStream } from "../utils/stream-handler.js";
+import { extractDeepSeekUsage, calculateDeepSeekCost } from "../utils/pricing.js";
 
 export const gatewayRouter = Router();
 
@@ -577,8 +578,8 @@ gatewayRouter.post("/v1/messages", authMiddleware, async (req, res) => {
             let streamBuffer = "";
             let inputTokens = 0;
             let outputTokens = 0;
-            let cacheCreationTokens = 0;
-            let cacheReadTokens = 0;
+            let cacheHitInputTokens = 0;
+            let cacheMissInputTokens = 0;
 
             while (true) {
                 const { done, value } = await reader.read();
@@ -595,23 +596,25 @@ gatewayRouter.post("/v1/messages", authMiddleware, async (req, res) => {
                         try {
                             const dataJson = JSON.parse(trimmed.slice(6));
                             if (dataJson.message?.usage) {
-                                if (dataJson.message.usage.input_tokens) {
-                                    inputTokens = dataJson.message.usage.input_tokens;
-                                }
-                                if (dataJson.message.usage.cache_creation_input_tokens) {
-                                    cacheCreationTokens = dataJson.message.usage.cache_creation_input_tokens;
-                                }
-                                if (dataJson.message.usage.cache_read_input_tokens) {
-                                    cacheReadTokens = dataJson.message.usage.cache_read_input_tokens;
-                                }
+                                const msgUsage = dataJson.message.usage;
+                                if (msgUsage.input_tokens) inputTokens = msgUsage.input_tokens;
+                                if (msgUsage.output_tokens) outputTokens = msgUsage.output_tokens;
+                                if (msgUsage.cache_read_input_tokens) cacheHitInputTokens = msgUsage.cache_read_input_tokens;
+                                if (msgUsage.cache_creation_input_tokens) cacheMissInputTokens = msgUsage.cache_creation_input_tokens;
+                                if (msgUsage.prompt_cache_hit_tokens) cacheHitInputTokens = msgUsage.prompt_cache_hit_tokens;
+                                if (msgUsage.prompt_cache_miss_tokens) cacheMissInputTokens = msgUsage.prompt_cache_miss_tokens;
                             }
                             if (dataJson.usage) {
-                                if (dataJson.usage.output_tokens) {
-                                    outputTokens = dataJson.usage.output_tokens;
-                                }
-                                if (dataJson.usage.input_tokens) {
-                                    inputTokens = dataJson.usage.input_tokens;
-                                }
+                                const u = dataJson.usage;
+                                if (u.input_tokens) inputTokens = u.input_tokens;
+                                if (u.prompt_tokens) inputTokens = u.prompt_tokens;
+                                if (u.output_tokens) outputTokens = u.output_tokens;
+                                if (u.completion_tokens) outputTokens = u.completion_tokens;
+                                if (u.prompt_cache_hit_tokens) cacheHitInputTokens = u.prompt_cache_hit_tokens;
+                                if (u.prompt_cache_miss_tokens) cacheMissInputTokens = u.prompt_cache_miss_tokens;
+                                if (u.cache_read_input_tokens) cacheHitInputTokens = u.cache_read_input_tokens;
+                                if (u.cache_hit_input_tokens) cacheHitInputTokens = u.cache_hit_input_tokens;
+                                if (u.cache_creation_input_tokens) cacheMissInputTokens = u.cache_creation_input_tokens;
                             }
                         } catch {}
                     }
@@ -622,16 +625,29 @@ gatewayRouter.post("/v1/messages", authMiddleware, async (req, res) => {
 
             const latencyMs = Date.now() - callStartTime;
 
+            let usage = {
+                inputTokens,
+                outputTokens,
+                cacheHitInputTokens,
+                cacheMissInputTokens: cacheMissInputTokens || Math.max(0, inputTokens - cacheHitInputTokens)
+            };
+            let costDetails = {};
+
+            if (provider.id === "deepseek") {
+                costDetails = calculateDeepSeekCost(upstreamModel, usage);
+            }
+
             // Log model call for direct stream
             await insertModelCall({
                 requestId,
                 provider: provider.id,
                 model: upstreamModel,
-                inputTokens,
-                outputTokens,
-                cacheHitInputTokens: cacheReadTokens,
-                cacheMissInputTokens: inputTokens - cacheReadTokens,
-                latencyMs
+                inputTokens: usage.inputTokens,
+                outputTokens: usage.outputTokens,
+                cacheHitInputTokens: usage.cacheHitInputTokens,
+                cacheMissInputTokens: usage.cacheMissInputTokens,
+                latencyMs,
+                ...costDetails
             });
 
             const totalLatencyMs = Date.now() - startTime;
@@ -665,20 +681,30 @@ gatewayRouter.post("/v1/messages", authMiddleware, async (req, res) => {
 
         if (responseBody && upstream.status === 200) {
             const sanitized = provider.id === "deepseek" ? sanitizeAnthropicResponse(responseBody) : responseBody;
-            const inputTokens = responseBody.usage?.input_tokens || 0;
-            const outputTokens = responseBody.usage?.output_tokens || 0;
-            const cacheReadTokens = responseBody.usage?.cache_read_input_tokens || 0;
+            let usage = { inputTokens: 0, outputTokens: 0, cacheHitInputTokens: 0, cacheMissInputTokens: 0 };
+            let costDetails = {};
+
+            if (provider.id === "deepseek") {
+                usage = extractDeepSeekUsage(responseBody);
+                costDetails = calculateDeepSeekCost(upstreamModel, usage);
+            } else {
+                usage.inputTokens = responseBody.usage?.input_tokens || responseBody.usage?.prompt_tokens || 0;
+                usage.outputTokens = responseBody.usage?.output_tokens || responseBody.usage?.completion_tokens || 0;
+                usage.cacheHitInputTokens = responseBody.usage?.cache_read_input_tokens || 0;
+                usage.cacheMissInputTokens = usage.inputTokens - usage.cacheHitInputTokens;
+            }
 
             // Log model call for direct non-stream
             await insertModelCall({
                 requestId,
                 provider: provider.id,
                 model: upstreamModel,
-                inputTokens,
-                outputTokens,
-                cacheHitInputTokens: cacheReadTokens,
-                cacheMissInputTokens: inputTokens - cacheReadTokens,
-                latencyMs: callLatencyMs
+                inputTokens: usage.inputTokens,
+                outputTokens: usage.outputTokens,
+                cacheHitInputTokens: usage.cacheHitInputTokens,
+                cacheMissInputTokens: usage.cacheMissInputTokens,
+                latencyMs: callLatencyMs,
+                ...costDetails
             });
 
             await updateGatewayRequest(requestId, upstream.status, totalLatencyMs);
@@ -693,8 +719,8 @@ gatewayRouter.post("/v1/messages", authMiddleware, async (req, res) => {
                 status: upstream.status,
                 latencyMs: totalLatencyMs,
                 stream: false,
-                inputTokens,
-                outputTokens,
+                inputTokens: usage.inputTokens,
+                outputTokens: usage.outputTokens,
                 provider: provider.id
             });
 

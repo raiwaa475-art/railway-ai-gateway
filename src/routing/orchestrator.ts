@@ -7,6 +7,7 @@ import { DeepSeekProvider } from "../providers/deepseek.js";
 import { QwenLocalProvider } from "../providers/qwen-local.js";
 import { config } from "../config/env.js";
 import { insertModelCall, updateGatewayRequest } from "../utils/db.js";
+import { extractDeepSeekUsage, calculateDeepSeekCost } from "../utils/pricing.js";
 
 function hasToolResults(messages: any[]): boolean {
     return messages.some(msg => {
@@ -626,15 +627,19 @@ Shape: {"approved":true,"reason":"short reason"}`,
         reason = typeof parsed?.reason === "string" ? parsed.reason : reason;
     } catch {}
 
+    const usage = extractDeepSeekUsage(data);
+    const costDetails = calculateDeepSeekCost(config.defaultModel, usage);
+
     await insertModelCall({
         requestId,
         provider: "deepseek",
         model: `${config.defaultModel}-patch-approval`,
-        inputTokens: data.usage?.input_tokens || 0,
-        outputTokens: data.usage?.output_tokens || 0,
-        cacheHitInputTokens: data.usage?.cache_read_input_tokens || 0,
-        cacheMissInputTokens: (data.usage?.input_tokens || 0) - (data.usage?.cache_read_input_tokens || 0),
-        latencyMs
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        cacheHitInputTokens: usage.cacheHitInputTokens,
+        cacheMissInputTokens: usage.cacheMissInputTokens,
+        latencyMs,
+        ...costDetails
     });
 
     return {
@@ -760,19 +765,19 @@ Expected JSON shape:
         }
 
         // Log delegation router model call
-        const inputTokens = routerData.usage?.input_tokens || 0;
-        const outputTokens = routerData.usage?.output_tokens || 0;
-        const cacheReadTokens = routerData.usage?.cache_read_input_tokens || 0;
+        const usage = extractDeepSeekUsage(routerData);
+        const costDetails = calculateDeepSeekCost(config.defaultModel, usage);
 
         await insertModelCall({
             requestId,
             provider: "deepseek",
             model: `${config.defaultModel}-router`,
-            inputTokens,
-            outputTokens,
-            cacheHitInputTokens: cacheReadTokens,
-            cacheMissInputTokens: inputTokens - cacheReadTokens,
-            latencyMs
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            cacheHitInputTokens: usage.cacheHitInputTokens,
+            cacheMissInputTokens: usage.cacheMissInputTokens,
+            latencyMs,
+            ...costDetails
         });
 
         return decision;
@@ -834,23 +839,25 @@ Expected JSON shape:
                         try {
                             const dataJson = JSON.parse(trimmed.slice(6));
                             if (dataJson.message?.usage) {
-                                if (dataJson.message.usage.input_tokens) {
-                                    inputTokens = dataJson.message.usage.input_tokens;
-                                }
-                                if (dataJson.message.usage.cache_creation_input_tokens) {
-                                    cacheCreationTokens = dataJson.message.usage.cache_creation_input_tokens;
-                                }
-                                if (dataJson.message.usage.cache_read_input_tokens) {
-                                    cacheReadTokens = dataJson.message.usage.cache_read_input_tokens;
-                                }
+                                const msgUsage = dataJson.message.usage;
+                                if (msgUsage.input_tokens) inputTokens = msgUsage.input_tokens;
+                                if (msgUsage.output_tokens) outputTokens = msgUsage.output_tokens;
+                                if (msgUsage.cache_read_input_tokens) cacheReadTokens = msgUsage.cache_read_input_tokens;
+                                if (msgUsage.cache_creation_input_tokens) cacheCreationTokens = msgUsage.cache_creation_input_tokens;
+                                if (msgUsage.prompt_cache_hit_tokens) cacheReadTokens = msgUsage.prompt_cache_hit_tokens;
+                                if (msgUsage.prompt_cache_miss_tokens) cacheCreationTokens = msgUsage.prompt_cache_miss_tokens;
                             }
                             if (dataJson.usage) {
-                                if (dataJson.usage.output_tokens) {
-                                    outputTokens = dataJson.usage.output_tokens;
-                                }
-                                if (dataJson.usage.input_tokens) {
-                                    inputTokens = dataJson.usage.input_tokens;
-                                }
+                                const u = dataJson.usage;
+                                if (u.input_tokens) inputTokens = u.input_tokens;
+                                if (u.prompt_tokens) inputTokens = u.prompt_tokens;
+                                if (u.output_tokens) outputTokens = u.output_tokens;
+                                if (u.completion_tokens) outputTokens = u.completion_tokens;
+                                if (u.prompt_cache_hit_tokens) cacheReadTokens = u.prompt_cache_hit_tokens;
+                                if (u.prompt_cache_miss_tokens) cacheCreationTokens = u.prompt_cache_miss_tokens;
+                                if (u.cache_read_input_tokens) cacheReadTokens = u.cache_read_input_tokens;
+                                if (u.cache_hit_input_tokens) cacheReadTokens = u.cache_hit_input_tokens;
+                                if (u.cache_creation_input_tokens) cacheCreationTokens = u.cache_creation_input_tokens;
                             }
                         } catch {}
                     }
@@ -861,11 +868,11 @@ Expected JSON shape:
             const text = await deepseekRes.text();
             try {
                 const dataJson = JSON.parse(text);
-                if (dataJson.usage) {
-                    inputTokens = dataJson.usage.input_tokens || 0;
-                    outputTokens = dataJson.usage.output_tokens || 0;
-                    cacheReadTokens = dataJson.usage.cache_read_input_tokens || 0;
-                }
+                const extracted = extractDeepSeekUsage(dataJson);
+                inputTokens = extracted.inputTokens;
+                outputTokens = extracted.outputTokens;
+                cacheReadTokens = extracted.cacheHitInputTokens;
+                cacheCreationTokens = extracted.cacheMissInputTokens;
             } catch {}
             res.send(text);
         }
@@ -879,34 +886,48 @@ Expected JSON shape:
         let savedOutputUsd = 0;
         let savedOutputThb = 0;
 
+        const upstreamModel = deepseekProvider.resolveUpstreamModel(body.model);
+
         if (qwenSavings) {
-            const missRate = config.deepseekInputCacheMissUsdPer1M / 1000000;
-            const outRate = config.deepseekOutputUsdPer1M / 1000000;
-            savedInputUsd = qwenSavings.inputTokens * missRate;
-            savedInputThb = savedInputUsd * config.usdThbRate;
-            savedOutputUsd = qwenSavings.outputTokens * outRate;
-            savedOutputThb = savedOutputUsd * config.usdThbRate;
-            savedUsd = savedInputUsd + savedOutputUsd;
-            savedThb = savedInputThb + savedOutputThb;
+            const hypotheticalUsage = {
+                inputTokens: qwenSavings.inputTokens,
+                outputTokens: qwenSavings.outputTokens,
+                cacheHitInputTokens: 0,
+                cacheMissInputTokens: qwenSavings.inputTokens
+            };
+            const hypotheticalCost = calculateDeepSeekCost(upstreamModel, hypotheticalUsage);
+            savedUsd = hypotheticalCost.totalCostUsd;
+            savedThb = hypotheticalCost.totalCostThb;
+            savedInputUsd = hypotheticalCost.inputCostUsd;
+            savedInputThb = hypotheticalCost.inputCostThb;
+            savedOutputUsd = hypotheticalCost.outputCostUsd;
+            savedOutputThb = hypotheticalCost.outputCostThb;
         }
 
-        const upstreamModel = deepseekProvider.resolveUpstreamModel(body.model);
+        const usage = {
+            inputTokens,
+            outputTokens,
+            cacheHitInputTokens: cacheReadTokens,
+            cacheMissInputTokens: cacheCreationTokens || Math.max(0, inputTokens - cacheReadTokens)
+        };
+        const costDetails = calculateDeepSeekCost(upstreamModel, usage);
 
         await insertModelCall({
             requestId,
             provider: "deepseek",
             model: upstreamModel,
-            inputTokens,
-            outputTokens,
-            cacheHitInputTokens: cacheReadTokens,
-            cacheMissInputTokens: inputTokens - cacheReadTokens,
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            cacheHitInputTokens: usage.cacheHitInputTokens,
+            cacheMissInputTokens: usage.cacheMissInputTokens,
             latencyMs: callLatencyMs,
             savedUsd,
             savedThb,
             savedInputUsd,
             savedInputThb,
             savedOutputUsd,
-            savedOutputThb
+            savedOutputThb,
+            ...costDetails
         });
 
         await updateGatewayRequest(requestId, deepseekRes.status, callLatencyMs);

@@ -114,6 +114,10 @@ export async function initDb() {
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS deepseek_approval_approved BOOLEAN;`);
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS emitted_tool_use VARCHAR(64);`);
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS fallback_reason VARCHAR(255);`);
+        await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS input_cache_hit_cost_usd NUMERIC(12, 6);`);
+        await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS input_cache_miss_cost_usd NUMERIC(12, 6);`);
+        await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS pricing_model VARCHAR(255);`);
+        await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS pricing_source VARCHAR(255);`);
 
         console.log("Database tables initialized successfully.");
     } catch (err) {
@@ -173,6 +177,10 @@ export async function insertModelCall(params: {
     deepseekApprovalApproved?: boolean;
     emittedToolUse?: string;
     fallbackReason?: string;
+    inputCacheHitCostUsd?: number;
+    inputCacheMissCostUsd?: number;
+    pricingModel?: string;
+    pricingSource?: string;
 }) {
     if (!pool) return;
     try {
@@ -197,7 +205,11 @@ export async function insertModelCall(params: {
             qwenPatchValid,
             deepseekApprovalApproved,
             emittedToolUse,
-            fallbackReason
+            fallbackReason,
+            inputCacheHitCostUsd,
+            inputCacheMissCostUsd,
+            pricingModel,
+            pricingSource
         } = params;
 
         let inputCostUsd = params.inputCostUsd || 0;
@@ -208,6 +220,7 @@ export async function insertModelCall(params: {
         let cacheMiss = params.cacheMissInputTokens ?? inputTokens;
 
         if (provider === "deepseek" && !params.inputCostUsd) {
+            // Fallback default calculation if not passed
             const hitRate = config.deepseekInputCacheHitUsdPer1M / 1000000;
             const missRate = config.deepseekInputCacheMissUsdPer1M / 1000000;
             const outRate = config.deepseekOutputUsdPer1M / 1000000;
@@ -223,8 +236,8 @@ export async function insertModelCall(params: {
 
         await pool.query(
             `INSERT INTO model_calls 
-            (request_id, provider, model, input_tokens, output_tokens, cache_hit_input_tokens, cache_miss_input_tokens, latency_ms, cost_usd, cost_thb, saved_usd, saved_thb, input_cost_usd, input_cost_thb, output_cost_usd, output_cost_thb, saved_input_usd, saved_input_thb, saved_output_usd, saved_output_thb, qwen_draft_mode, qwen_draft_chars, qwen_draft_weak, qwen_retry_used, qwen_patch_mode, qwen_patch_valid, deepseek_approval_approved, emitted_tool_use, fallback_reason) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)`,
+            (request_id, provider, model, input_tokens, output_tokens, cache_hit_input_tokens, cache_miss_input_tokens, latency_ms, cost_usd, cost_thb, saved_usd, saved_thb, input_cost_usd, input_cost_thb, output_cost_usd, output_cost_thb, saved_input_usd, saved_input_thb, saved_output_usd, saved_output_thb, qwen_draft_mode, qwen_draft_chars, qwen_draft_weak, qwen_retry_used, qwen_patch_mode, qwen_patch_valid, deepseek_approval_approved, emitted_tool_use, fallback_reason, input_cache_hit_cost_usd, input_cache_miss_cost_usd, pricing_model, pricing_source) 
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)`,
             [
                 requestId,
                 provider,
@@ -254,7 +267,11 @@ export async function insertModelCall(params: {
                 qwenPatchValid ?? null,
                 deepseekApprovalApproved ?? null,
                 emittedToolUse || null,
-                fallbackReason || null
+                fallbackReason || null,
+                inputCacheHitCostUsd !== undefined ? inputCacheHitCostUsd : null,
+                inputCacheMissCostUsd !== undefined ? inputCacheMissCostUsd : null,
+                pricingModel || null,
+                pricingSource || null
             ]
         );
     } catch (err) {
