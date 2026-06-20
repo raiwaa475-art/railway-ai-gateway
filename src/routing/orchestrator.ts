@@ -8,6 +8,7 @@ import { QwenLocalProvider } from "../providers/qwen-local.js";
 import { config } from "../config/env.js";
 import { insertModelCall, updateGatewayRequest } from "../utils/db.js";
 import { extractDeepSeekUsage, calculateDeepSeekCost } from "../utils/pricing.js";
+import { evaluateConfidence } from "./confidence.js";
 
 type FileContextSource =
     | "tool_result_exact"
@@ -2065,6 +2066,47 @@ Do not output tool_use.`);
             qwenPatchReason = fallbackReason || qwenErrorType || "qwen_output_empty";
         }
 
+        const qwenOnlyLowRiskRequested = req.body.model === "qwen-only-low-risk";
+        const qwenOnlyLowRiskEnabled = config.qwenOnlyLowRiskEnabled && qwenOnlyLowRiskRequested;
+        const multipleFilesInvolved = (messages.filter((msg: any) => Array.isArray(msg.content) && msg.content.some((block: any) => block?.type === "tool_result")).length > 1);
+        const sensitiveKeywordsPresent = /auth|security|payment|database|migration/i.test(`${userIntent}\n${reducedContext}\n${targetFile}`);
+        const patchLarge = qwenDraftChars >= 2000;
+        const actualBuildCheckStatus = !qwenPatchValid
+            ? "failed"
+            : (multipleFilesInvolved || sensitiveKeywordsPresent || patchLarge)
+                ? "failed"
+                : "passed";
+        const confidence = evaluateConfidence({
+            hasExactOriginalFileContent,
+            fileContextSource,
+            qwenDraftMode,
+            qwenPatchValid,
+            qwenDraftWeak,
+            qwenRetryUsed,
+            fallbackReason,
+            directEditEligible,
+            anchorCandidateCount: anchorCandidates.length,
+            qwenDraftChars,
+            qwenInputTokens,
+            qwenOutputTokens,
+            multipleFilesInvolved,
+            sensitiveKeywordsPresent,
+            patchLarge,
+            buildCheckStatus: actualBuildCheckStatus
+        });
+        const buildCheckStatus = qwenOnlyLowRiskEnabled ? actualBuildCheckStatus : "not_run";
+        const qwenOnlyRejectedReason = !qwenOnlyLowRiskEnabled
+            ? "feature_disabled"
+            : !qwenPatchValid
+                ? "qwen_output_failed_validator"
+                : actualBuildCheckStatus === "failed"
+                    ? "build_test_verification_failed"
+                    : !confidence.canSkipDeepSeekDryRun
+                        ? confidence.reasons[0] || "confidence_not_low"
+                        : "";
+        const qwenOnlyUsed = qwenOnlyLowRiskEnabled && confidence.canSkipDeepSeekDryRun && qwenPatchValid && actualBuildCheckStatus === "passed";
+        const finalProvider = qwenOnlyUsed ? "qwen-local" : "deepseek";
+
         await insertModelCall({
             requestId,
             provider: "qwen-local",
@@ -2158,11 +2200,15 @@ Do not output tool_use.`);
             focusedContextLines: focused.lines,
             qwenLatencyMs,
             reason: decision.reason,
-            finalProvider: "deepseek",
+            finalProvider,
+            qwen_only_used: qwenOnlyUsed,
+            qwen_only_rejected_reason: qwenOnlyUsed ? "" : qwenOnlyRejectedReason,
+            confidence_risk_level: confidence.riskLevel,
+            build_check_status: buildCheckStatus,
             emittedToolUse,
             fallbackReason,
             qwenSkippedReason: !hasExactOriginalFileContent ? fallbackReason : undefined,
-            deepseekApplyMode: "verify_and_apply",
+            deepseekApplyMode: qwenOnlyUsed ? "qwen_only_final" : "verify_and_apply",
             deepseekContextMode,
             deepseekMaxTokenCap,
             deepseekOriginalMessageCount: req.body.messages.length,
@@ -2173,6 +2219,35 @@ Do not output tool_use.`);
             directEditEligible,
             qwenDelegationMode
         }));
+
+        if (qwenOnlyUsed) {
+            const qwenOnlyResponse = {
+                id: "msg_qwen_only_" + Math.random().toString(36).substring(7),
+                type: "message",
+                role: "assistant",
+                content: draftText ? [{ type: "text", text: draftText }] : [{ type: "text", text: "" }],
+                model: activeModelName,
+                stop_reason: "end_turn",
+                stop_sequence: null,
+                usage: {
+                    input_tokens: qwenInputTokens,
+                    output_tokens: qwenOutputTokens
+                }
+            };
+            const totalLatencyMs = Date.now() - qwenStartTime;
+            await updateGatewayRequest(requestId, 200, totalLatencyMs);
+            if (isStream) {
+                res.setHeader("content-type", "text/event-stream");
+                res.setHeader("cache-control", "no-cache");
+                res.setHeader("x-accel-buffering", "no");
+                res.setHeader("connection", "keep-alive");
+                res.write(`data: ${JSON.stringify(qwenOnlyResponse)}\n\n`);
+                res.end();
+            } else {
+                res.json(qwenOnlyResponse);
+            }
+            return;
+        }
 
         const qwenSavings = qwenDraftUsed ? { inputTokens: qwenInputTokens, outputTokens: qwenOutputTokens } : undefined;
         await this.forwardToDeepSeek(finalBody, clientHeaders, res, isStream, requestId, qwenSavings);

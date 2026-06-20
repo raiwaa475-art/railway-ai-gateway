@@ -42,5 +42,6 @@ export const config = {
     defaultProviderId: process.env.DEFAULT_PROVIDER_ID || "",
     qwenLocalMaxTokens: Number(process.env.QWEN_LOCAL_MAX_TOKENS || 32000),
     qwenLocalTimeoutMs: Number(process.env.QWEN_LOCAL_TIMEOUT_MS || 180000),
+    qwenOnlyLowRiskEnabled: process.env.QWEN_ONLY_LOW_RISK_ENABLED === "true",
     allowRailwayDiskFileContext: process.env.ALLOW_RAILWAY_DISK_FILE_CONTEXT === "true"
 };

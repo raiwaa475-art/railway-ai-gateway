@@ -13,6 +13,10 @@ export interface ConfidenceInput {
     qwenDraftChars?: number;
     qwenInputTokens?: number;
     qwenOutputTokens?: number;
+    multipleFilesInvolved?: boolean;
+    sensitiveKeywordsPresent?: boolean;
+    patchLarge?: boolean;
+    buildCheckStatus?: string;
 }
 
 export function evaluateConfidence(input: ConfidenceInput): {
@@ -26,6 +30,7 @@ export function evaluateConfidence(input: ConfidenceInput): {
     const fileContextSource = String(input.fileContextSource || "none");
     const qwenDraftMode = String(input.qwenDraftMode || "empty");
     const qwenDraftChars = Number(input.qwenDraftChars || 0);
+    const buildCheckStatus = String(input.buildCheckStatus || "not_run");
 
     if (!input.hasExactOriginalFileContent) {
         score += 2;
@@ -60,6 +65,21 @@ export function evaluateConfidence(input: ConfidenceInput): {
         reasons.add("no_anchor_candidates");
     }
 
+    if (input.multipleFilesInvolved) {
+        score += 2;
+        reasons.add("multiple_files_involved");
+    }
+
+    if (input.sensitiveKeywordsPresent) {
+        score += 3;
+        reasons.add("sensitive_keywords_present");
+    }
+
+    if (input.patchLarge) {
+        score += 2;
+        reasons.add("patch_large");
+    }
+
     if (qwenDraftMode === "empty" || qwenDraftMode === "notes" || qwenDraftMode === "insufficient_context") {
         score += 2;
         reasons.add(`draft_mode_${qwenDraftMode}`);
@@ -80,6 +100,14 @@ export function evaluateConfidence(input: ConfidenceInput): {
         reasons.add("direct_edit_eligible");
     }
 
+    if (buildCheckStatus === "failed") {
+        score += 3;
+        reasons.add("build_check_failed");
+    } else if (buildCheckStatus === "warning") {
+        score += 1;
+        reasons.add("build_check_warning");
+    }
+
     const riskLevel: ConfidenceRiskLevel = score <= 1 ? "low" : score <= 4 ? "medium" : "high";
     const canSkipDeepSeekDryRun =
         riskLevel === "low" &&
@@ -87,6 +115,10 @@ export function evaluateConfidence(input: ConfidenceInput): {
         !!input.hasExactOriginalFileContent &&
         !input.qwenDraftWeak &&
         !input.qwenRetryUsed &&
+        !input.multipleFilesInvolved &&
+        !input.sensitiveKeywordsPresent &&
+        !input.patchLarge &&
+        buildCheckStatus !== "failed" &&
         fileContextSource !== "none" &&
         fileContextSource !== "reduced_context";
 

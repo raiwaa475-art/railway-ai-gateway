@@ -23,6 +23,12 @@ export const SUPPORTED_MODELS: ModelDefinition[] = [
         displayName: "Hybrid Flow (DeepSeek + Qwen Local)",
         providerId: "hybrid",
         aliases: ["hybrid-flow", "qwen-smart"]
+    },
+    {
+        id: "qwen-only-low-risk",
+        displayName: "Qwen Only Low Risk",
+        providerId: "hybrid",
+        aliases: ["qwen-only-low-risk"]
     }
 ];
 

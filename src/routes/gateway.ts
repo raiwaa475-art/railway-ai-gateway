@@ -369,7 +369,7 @@ gatewayRouter.post("/v1/messages", authMiddleware, async (req, res) => {
     const startTime = Date.now();
     const clientModel = req.body?.model || "unknown";
     const isStream = !!req.body?.stream;
-    const mode = (clientModel === "hybrid-flow" || clientModel === "qwen-smart") ? "hybrid-flow" : "direct";
+    const mode = (clientModel === "hybrid-flow" || clientModel === "qwen-smart") ? "hybrid-flow" : clientModel === "qwen-only-low-risk" ? "qwen-only-low-risk" : "direct";
 
     // Insert gateway request to DB
     await insertGatewayRequest(requestId, clientModel, mode, isStream);
@@ -487,7 +487,7 @@ gatewayRouter.post("/v1/messages", authMiddleware, async (req, res) => {
         console.error("Configurable provider routing error:", e);
     }
 
-    if (clientModel === "hybrid-flow" || clientModel === "qwen-smart") {
+    if (clientModel === "hybrid-flow" || clientModel === "qwen-smart" || clientModel === "qwen-only-low-risk") {
         logRequest({
             type: "request",
             requestId,
