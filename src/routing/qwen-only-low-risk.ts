@@ -521,6 +521,63 @@ function hasDangerousToolCall(content: any[]): boolean {
     return false;
 }
 
+function hasReadOnlyToolResult(messages: any[]): boolean {
+    if (!Array.isArray(messages)) return false;
+    for (const msg of messages) {
+        if (!Array.isArray(msg?.content)) continue;
+        for (const block of msg.content) {
+            if (block?.type !== "tool_result") continue;
+            const toolUseId = block.tool_use_id;
+            if (!toolUseId) continue;
+            
+            const toolUseMsg = messages.find(m =>
+                Array.isArray(m?.content) && m.content.some((b: any) => b?.type === "tool_use" && b.id === toolUseId)
+            );
+            const toolUseBlock = toolUseMsg?.content?.find((b: any) => b?.type === "tool_use" && b.id === toolUseId);
+            const toolName = toolUseBlock?.name || "";
+            
+            if (isSafeReadOnlyTool(toolName)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+function extractReadOnlyToolResults(messages: any[]): string {
+    if (!Array.isArray(messages)) return "";
+    const parts: string[] = [];
+    for (const msg of messages) {
+        if (!Array.isArray(msg?.content)) continue;
+        for (const block of msg.content) {
+            if (block?.type !== "tool_result") continue;
+            const toolUseId = block.tool_use_id;
+            if (!toolUseId) continue;
+            
+            const toolUseMsg = messages.find(m =>
+                Array.isArray(m?.content) && m.content.some((b: any) => b?.type === "tool_use" && b.id === toolUseId)
+            );
+            const toolUseBlock = toolUseMsg?.content?.find((b: any) => b?.type === "tool_use" && b.id === toolUseId);
+            const toolName = toolUseBlock?.name || "";
+            
+            if (isSafeReadOnlyTool(toolName)) {
+                let text = "";
+                if (typeof block.content === "string") {
+                    text = block.content;
+                } else if (Array.isArray(block.content)) {
+                    text = block.content.map((b: any) => b?.text || "").join("\n");
+                } else if (block.content !== undefined) {
+                    text = JSON.stringify(block.content);
+                }
+                if (text.trim()) {
+                    parts.push(`Tool result of ${toolName} (ID: ${toolUseId}):\n${text}`);
+                }
+            }
+        }
+    }
+    return parts.join("\n\n");
+}
+
 async function forwardToQwenLocal(
     req: Request,
     res: Response,
@@ -531,12 +588,37 @@ async function forwardToQwenLocal(
     const provider = await resolveQwenProvider();
     const finalBody = { ...req.body };
 
+    const hasReadOnlyResult = decision.intentType === "read_only" && hasReadOnlyToolResult(req.body.messages);
+    const readOnlyFinalAnswerMode = hasReadOnlyResult;
+
     if (decision.intentType === "read_only") {
-        const readOnlyInstruction = "When you need to read files, use the available Read/List/Glob/Grep tools through tool_use. Do not print JSON tool calls as text. Do not use Write/Edit for read-only requests.";
-        if (finalBody.system) {
-            finalBody.system = `${finalBody.system}\n\n${readOnlyInstruction}`;
+        if (readOnlyFinalAnswerMode) {
+            if (finalBody.tools) {
+                delete finalBody.tools;
+            }
+            finalBody.stream = false;
+            
+            const latestIntent = decision.realUserIntent;
+            const toolResultsText = extractReadOnlyToolResults(req.body.messages);
+            const combinedUserMessageContent = `User Request: ${latestIntent}\n\nHere are the collected tool results:\n${toolResultsText}`;
+            finalBody.messages = [{
+                role: "user",
+                content: combinedUserMessageContent
+            }];
+
+            const finalInstruction = "You already have the requested Read/LS/Glob/Grep result. Answer using only this content. Do not call tools. Do not output tool JSON.";
+            if (finalBody.system) {
+                finalBody.system = `${finalBody.system}\n\n${finalInstruction}`;
+            } else {
+                finalBody.system = finalInstruction;
+            }
         } else {
-            finalBody.system = readOnlyInstruction;
+            const readOnlyInstruction = "When you need to read files, use the available Read/List/Glob/Grep tools through tool_use. Do not print JSON tool calls as text. Do not use Write/Edit for read-only requests.";
+            if (finalBody.system) {
+                finalBody.system = `${finalBody.system}\n\n${readOnlyInstruction}`;
+            } else {
+                finalBody.system = readOnlyInstruction;
+            }
         }
     } else if (decision.intentType === "chat" || decision.intentType === "planning" || decision.intentType === "explanation") {
         if (finalBody.tools) {
@@ -552,6 +634,8 @@ async function forwardToQwenLocal(
             clientModel: finalBody.model || "qwen-only-low-risk",
             qwenOnlyUsed: false,
             qwenOnlyRejectedReason: "Qwen local provider is not registered",
+            hasReadOnlyToolResult: hasReadOnlyResult,
+            readOnlyFinalAnswerMode: readOnlyFinalAnswerMode,
             qwenToolCallValid: true,
             qwenFakeToolJsonDetected: false,
             qwenFakeToolJsonConverted: false,
@@ -596,6 +680,8 @@ async function forwardToQwenLocal(
             intentType: decision.intentType,
             qwenOnlyUsed: false,
             qwenOnlyRejectedReason: `Qwen local provider returned ${upstream.status}`,
+            hasReadOnlyToolResult: hasReadOnlyResult,
+            readOnlyFinalAnswerMode: readOnlyFinalAnswerMode,
             qwenToolCallValid: true,
             qwenFakeToolJsonDetected: false,
             qwenFakeToolJsonConverted: false,
@@ -684,6 +770,8 @@ async function forwardToQwenLocal(
             intentType: decision.intentType,
             qwenOnlyUsed: true,
             qwenOnlyRejectedReason: "",
+            hasReadOnlyToolResult: hasReadOnlyResult,
+            readOnlyFinalAnswerMode: readOnlyFinalAnswerMode,
             qwenToolCallValid: true,
             qwenFakeToolJsonDetected: false,
             qwenFakeToolJsonConverted: false,
@@ -740,25 +828,64 @@ async function forwardToQwenLocal(
                 }
             }
 
-            if (hasFakeJson && fakeCall) {
-                qwenFakeToolJsonDetected = true;
-                requestedToolName = fakeCall.name;
+            if (readOnlyFinalAnswerMode) {
+                const hasRealTool = content.some(block => block?.type === "tool_use");
+                if (hasFakeJson || hasRealTool) {
+                    qwenToolCallValid = false;
+                    blockedToolReason = "tool_call_in_final_answer_mode";
+                    qwenOnlyRejectedReason = "qwen_finalize_failed";
+                    qwenOnlyUsed = false;
+                    finalProvider = "none";
+                    if (hasFakeJson && fakeCall) {
+                        qwenFakeToolJsonDetected = true;
+                        requestedToolName = fakeCall.name;
+                    } else {
+                        const firstTool = content.find(block => block?.type === "tool_use");
+                        requestedToolName = firstTool?.name || "";
+                    }
+                }
+            } else {
+                if (hasFakeJson && fakeCall) {
+                    qwenFakeToolJsonDetected = true;
+                    requestedToolName = fakeCall.name;
 
-                const isDangerous = isDangerousTool(fakeCall.name);
-                const isSafe = isSafeReadOnlyTool(fakeCall.name);
+                    const isDangerous = isDangerousTool(fakeCall.name);
+                    const isSafe = isSafeReadOnlyTool(fakeCall.name);
 
-                if (decision.intentType === "read_only") {
-                    if (isDangerous) {
-                        qwenToolCallValid = false;
-                        blockedToolReason = "unsafe_tool_in_read_only";
-                        qwenOnlyRejectedReason = "qwen_dangerous_tool_rejected";
-                        qwenOnlyUsed = false;
-                        finalProvider = "none";
-                    } else if (isSafe) {
+                    if (decision.intentType === "read_only") {
+                        if (isDangerous) {
+                            qwenToolCallValid = false;
+                            blockedToolReason = "unsafe_tool_in_read_only";
+                            qwenOnlyRejectedReason = "qwen_dangerous_tool_rejected";
+                            qwenOnlyUsed = false;
+                            finalProvider = "none";
+                        } else if (isSafe) {
+                            qwenFakeToolJsonConverted = true;
+                            const newToolUseBlock = {
+                                type: "tool_use",
+                                id: "toolu_qwen_read_only_" + Math.random().toString(36).substring(7),
+                                name: fakeCall.name,
+                                input: fakeCall.input
+                            };
+                            const newContent = [...content];
+                            newContent[fakeBlockIndex] = newToolUseBlock;
+                            validatedBody = {
+                                ...responseBody,
+                                content: newContent,
+                                stop_reason: "tool_use"
+                            };
+                        } else {
+                            qwenToolCallValid = false;
+                            blockedToolReason = "invalid_tool_in_read_only";
+                            qwenOnlyRejectedReason = "qwen_invalid_tool_rejected";
+                            qwenOnlyUsed = false;
+                            finalProvider = "none";
+                        }
+                    } else {
                         qwenFakeToolJsonConverted = true;
                         const newToolUseBlock = {
                             type: "tool_use",
-                            id: "toolu_qwen_read_only_" + Math.random().toString(36).substring(7),
+                            id: "toolu_qwen_edit_" + Math.random().toString(36).substring(7),
                             name: fakeCall.name,
                             input: fakeCall.input
                         };
@@ -769,48 +896,27 @@ async function forwardToQwenLocal(
                             content: newContent,
                             stop_reason: "tool_use"
                         };
-                    } else {
-                        qwenToolCallValid = false;
-                        blockedToolReason = "invalid_tool_in_read_only";
-                        qwenOnlyRejectedReason = "qwen_invalid_tool_rejected";
-                        qwenOnlyUsed = false;
-                        finalProvider = "none";
                     }
                 } else {
-                    qwenFakeToolJsonConverted = true;
-                    const newToolUseBlock = {
-                        type: "tool_use",
-                        id: "toolu_qwen_edit_" + Math.random().toString(36).substring(7),
-                        name: fakeCall.name,
-                        input: fakeCall.input
-                    };
-                    const newContent = [...content];
-                    newContent[fakeBlockIndex] = newToolUseBlock;
-                    validatedBody = {
-                        ...responseBody,
-                        content: newContent,
-                        stop_reason: "tool_use"
-                    };
-                }
-            } else {
-                for (const block of content) {
-                    if (block?.type === "tool_use") {
-                        requestedToolName = block.name;
-                        if (decision.intentType === "read_only") {
-                            if (isDangerousTool(block.name)) {
-                                qwenToolCallValid = false;
-                                blockedToolReason = "unsafe_tool_in_read_only";
-                                qwenOnlyRejectedReason = "qwen_dangerous_tool_rejected";
-                                qwenOnlyUsed = false;
-                                finalProvider = "none";
-                                break;
-                            } else if (!isSafeReadOnlyTool(block.name)) {
-                                qwenToolCallValid = false;
-                                blockedToolReason = "invalid_tool_in_read_only";
-                                qwenOnlyRejectedReason = "qwen_invalid_tool_rejected";
-                                qwenOnlyUsed = false;
-                                finalProvider = "none";
-                                break;
+                    for (const block of content) {
+                        if (block?.type === "tool_use") {
+                            requestedToolName = block.name;
+                            if (decision.intentType === "read_only") {
+                                if (isDangerousTool(block.name)) {
+                                    qwenToolCallValid = false;
+                                    blockedToolReason = "unsafe_tool_in_read_only";
+                                    qwenOnlyRejectedReason = "qwen_dangerous_tool_rejected";
+                                    qwenOnlyUsed = false;
+                                    finalProvider = "none";
+                                    break;
+                                } else if (!isSafeReadOnlyTool(block.name)) {
+                                    qwenToolCallValid = false;
+                                    blockedToolReason = "invalid_tool_in_read_only";
+                                    qwenOnlyRejectedReason = "qwen_invalid_tool_rejected";
+                                    qwenOnlyUsed = false;
+                                    finalProvider = "none";
+                                    break;
+                                }
                             }
                         }
                     }
@@ -823,6 +929,8 @@ async function forwardToQwenLocal(
         let rejectionText = "Qwen-only could not produce a valid tool call. Use qwen-smart.";
         if (decision.intentType === "read_only" && blockedToolReason === "unsafe_tool_in_read_only") {
             rejectionText = "Qwen-only rejected: unsafe tool for read-only request. Use qwen-smart.";
+        } else if (readOnlyFinalAnswerMode) {
+            rejectionText = "Qwen-only could not finalize the read-only answer. Use qwen-smart.";
         }
 
         validatedBody = {
@@ -866,6 +974,8 @@ async function forwardToQwenLocal(
         intentType: decision.intentType,
         qwenOnlyUsed,
         qwenOnlyRejectedReason,
+        hasReadOnlyToolResult: hasReadOnlyResult,
+        readOnlyFinalAnswerMode,
         qwenToolCallValid,
         qwenFakeToolJsonDetected,
         qwenFakeToolJsonConverted,
@@ -903,6 +1013,9 @@ export async function handleQwenOnlyLowRiskRequest(req: Request, res: Response):
     const decision = classifyQwenOnlyIntent(req.body);
     const clientModel = req.body?.model || "qwen-only-low-risk";
 
+    const hasReadOnlyResult = decision.intentType === "read_only" && hasReadOnlyToolResult(req.body?.messages);
+    const readOnlyFinalAnswerMode = hasReadOnlyResult;
+
     if (!enabled) {
         await updateGatewayRequest(requestId, 403, Date.now() - startTime);
         logEntry({
@@ -913,6 +1026,8 @@ export async function handleQwenOnlyLowRiskRequest(req: Request, res: Response):
             intentType: decision.intentType,
             qwenOnlyUsed: false,
             qwenOnlyRejectedReason: "Qwen-only low-risk mode is disabled",
+            hasReadOnlyToolResult: hasReadOnlyResult,
+            readOnlyFinalAnswerMode: readOnlyFinalAnswerMode,
             qwenToolCallValid: true,
             qwenFakeToolJsonDetected: false,
             qwenFakeToolJsonConverted: false,
@@ -943,6 +1058,8 @@ export async function handleQwenOnlyLowRiskRequest(req: Request, res: Response):
             intentType: decision.intentType,
             qwenOnlyUsed: false,
             qwenOnlyRejectedReason: QWEN_ONLY_REJECTION_MESSAGE,
+            hasReadOnlyToolResult: hasReadOnlyResult,
+            readOnlyFinalAnswerMode: readOnlyFinalAnswerMode,
             qwenToolCallValid: true,
             qwenFakeToolJsonDetected: false,
             qwenFakeToolJsonConverted: false,
@@ -971,6 +1088,8 @@ export async function handleQwenOnlyLowRiskRequest(req: Request, res: Response):
         intentType: decision.intentType,
         qwenOnlyUsed: true,
         qwenOnlyRejectedReason: "",
+        hasReadOnlyToolResult: hasReadOnlyResult,
+        readOnlyFinalAnswerMode: readOnlyFinalAnswerMode,
         qwenToolCallValid: true,
         qwenFakeToolJsonDetected: false,
         qwenFakeToolJsonConverted: false,

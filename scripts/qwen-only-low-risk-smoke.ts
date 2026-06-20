@@ -350,6 +350,109 @@ async function main() {
         };
     });
 
+    // read_only + tool_result => final answer mode (text accepted)
+    const finalizationSuccess = await runCase("read_only_finalization_success", {
+        model: "qwen-only-low-risk",
+        stream: false,
+        messages: [
+            { role: "user", content: "อ่านไฟล์" },
+            {
+                role: "assistant",
+                content: [
+                    {
+                        type: "tool_use",
+                        id: "toolu_read_1",
+                        name: "Read",
+                        input: { file_path: "src/config/env.ts" }
+                    }
+                ]
+            },
+            {
+                role: "user",
+                content: [
+                    {
+                        type: "tool_result",
+                        tool_use_id: "toolu_read_1",
+                        content: "PORT=3000\nDATABASE_URL=postgres://..."
+                    }
+                ]
+            }
+        ]
+    }, {
+        status: 200,
+        calls: 1
+    }, () => {
+        return {
+            id: "msg_fake_qwen_final_text",
+            type: "message",
+            role: "assistant",
+            content: [
+                {
+                    type: "text",
+                    text: "Based on the file, the port is 3000 and DB is postgres."
+                }
+            ],
+            model: "qwen-local",
+            stop_reason: "end_turn",
+            stop_sequence: null,
+            usage: { input_tokens: 20, output_tokens: 15 }
+        };
+    });
+    assert.equal(finalizationSuccess.jsonBody?.content?.[0]?.type, "text");
+    assert.equal(finalizationSuccess.jsonBody?.content?.[0]?.text, "Based on the file, the port is 3000 and DB is postgres.");
+
+    // read_only + tool_result => final answer mode (rejected if tries another tool)
+    await runCase("read_only_finalization_rejected_on_tool_call", {
+        model: "qwen-only-low-risk",
+        stream: false,
+        messages: [
+            { role: "user", content: "อ่านไฟล์" },
+            {
+                role: "assistant",
+                content: [
+                    {
+                        type: "tool_use",
+                        id: "toolu_read_1",
+                        name: "Read",
+                        input: { file_path: "src/config/env.ts" }
+                    }
+                ]
+            },
+            {
+                role: "user",
+                content: [
+                    {
+                        type: "tool_result",
+                        tool_use_id: "toolu_read_1",
+                        content: "PORT=3000\nDATABASE_URL=postgres://..."
+                    }
+                ]
+            }
+        ]
+    }, {
+        status: 200,
+        calls: 1,
+        rejection: "Qwen-only could not finalize the read-only answer. Use qwen-smart."
+    }, () => {
+        return {
+            id: "msg_fake_qwen_tool_again",
+            type: "message",
+            role: "assistant",
+            content: [
+                {
+                    type: "tool_use",
+                    id: "toolu_read_2",
+                    name: "Read",
+                    input: { file_path: "src/routes/gateway.ts" }
+                }
+            ],
+            model: "qwen-local",
+            stop_reason: "tool_use",
+            stop_sequence: null,
+            usage: { input_tokens: 20, output_tokens: 15 }
+        };
+    });
+
     await runCase("code_edit_no_context", {
         model: "qwen-only-low-risk",
         stream: false,
