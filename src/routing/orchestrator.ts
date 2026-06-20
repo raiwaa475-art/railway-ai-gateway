@@ -1,4 +1,4 @@
-import { Request, Response as ExpressResponse } from "express";
+﻿import { Request, Response as ExpressResponse } from "express";
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
@@ -8,7 +8,7 @@ import { QwenLocalProvider } from "../providers/qwen-local.js";
 import { config } from "../config/env.js";
 import { insertModelCall, updateGatewayRequest } from "../utils/db.js";
 import { extractDeepSeekUsage, calculateDeepSeekCost } from "../utils/pricing.js";
-import { evaluateConfidence } from "./confidence.js";
+import { ConfidenceRiskLevel, evaluateConfidence } from "./confidence.js";
 
 type FileContextSource =
     | "tool_result_exact"
@@ -50,10 +50,10 @@ function getLastRealUserInstruction(messages: any[]): string {
 function isLikelyCodeEditTask(text: string): boolean {
     const normalized = String(text || "").toLowerCase();
     const explicitReadOnlyPatterns = [
-        "เธซเนเธฒเธกเนเธเน",
-        "เธซเนเธฒเธกเนเธเนเนเธเธฅเน",
-        "เนเธกเนเธ•เนเธญเธเนเธเน",
-        "เธญเธขเนเธฒเนเธเน",
+        "เน€เธเธเน€เธยเน€เธเธ’เน€เธเธเน€เธยเน€เธยเน€เธย",
+        "เน€เธเธเน€เธยเน€เธเธ’เน€เธเธเน€เธยเน€เธยเน€เธยเน€เธยเน€เธยเน€เธเธ…เน€เธย",
+        "เน€เธยเน€เธเธเน€เธยเน€เธโ€ขเน€เธยเน€เธเธเน€เธยเน€เธยเน€เธยเน€เธย",
+        "เน€เธเธเน€เธเธเน€เธยเน€เธเธ’เน€เธยเน€เธยเน€เธย",
         "read only",
         "do not edit",
         "don't edit",
@@ -64,16 +64,16 @@ function isLikelyCodeEditTask(text: string): boolean {
     }
 
     const codeEditKeywords = [
-        "เนเธเน",
-        "เนเธเนเนเธ",
-        "เธเธฃเธฑเธ",
-        "เน€เธเธฅเธตเนเธขเธ",
-        "เน€เธเธดเนเธก",
-        "เธฅเธ",
-        "เธ—เธณเนเธซเน",
-        "เน€เธเธตเธขเธ",
-        "เธชเธฃเนเธฒเธ",
-        "เนเธชเน",
+        "เน€เธยเน€เธยเน€เธย",
+        "เน€เธยเน€เธยเน€เธยเน€เธยเน€เธย",
+        "เน€เธยเน€เธเธเน€เธเธ‘เน€เธย",
+        "เน€เธโฌเน€เธยเน€เธเธ…เน€เธเธ•เน€เธยเน€เธเธเน€เธย",
+        "เน€เธโฌเน€เธยเน€เธเธ”เน€เธยเน€เธเธ",
+        "เน€เธเธ…เน€เธย",
+        "เน€เธโ€”เน€เธเธ“เน€เธยเน€เธเธเน€เธย",
+        "เน€เธโฌเน€เธยเน€เธเธ•เน€เธเธเน€เธย",
+        "เน€เธเธเน€เธเธเน€เธยเน€เธเธ’เน€เธย",
+        "เน€เธยเน€เธเธเน€เธย",
         "update",
         "edit",
         "fix",
@@ -106,12 +106,12 @@ function isContinuationIntent(text: string): boolean {
     if (!normalized) return false;
 
     const continuationPhrases = [
-        "เธ•เนเธญ",
-        "เธ—เธณเธ•เนเธญ",
-        "เธ•เนเธญเน€เธฅเธข",
-        "เนเธเนเธ•เนเธญ",
-        "เธเธฑเธ”",
-        "เน€เธญเธฒเน€เธฅเธข",
+        "เน€เธโ€ขเน€เธยเน€เธเธ",
+        "เน€เธโ€”เน€เธเธ“เน€เธโ€ขเน€เธยเน€เธเธ",
+        "เน€เธโ€ขเน€เธยเน€เธเธเน€เธโฌเน€เธเธ…เน€เธเธ",
+        "เน€เธยเน€เธยเน€เธยเน€เธโ€ขเน€เธยเน€เธเธ",
+        "เน€เธยเน€เธเธ‘เน€เธโ€",
+        "เน€เธโฌเน€เธเธเน€เธเธ’เน€เธโฌเน€เธเธ…เน€เธเธ",
         "ok",
         "okay",
         "continue",
@@ -136,9 +136,9 @@ function isReadOnlyIntent(text: string): boolean {
         "don't edit",
         "no edit",
         "read only",
-        "เนเธกเนเธ•เนเธญเธเนเธเน",
-        "เธญเธขเนเธฒเนเธเน",
-        "เธซเนเธฒเธกเนเธเน"
+        "เน€เธยเน€เธเธเน€เธยเน€เธโ€ขเน€เธยเน€เธเธเน€เธยเน€เธยเน€เธยเน€เธย",
+        "เน€เธเธเน€เธเธเน€เธยเน€เธเธ’เน€เธยเน€เธยเน€เธย",
+        "เน€เธเธเน€เธยเน€เธเธ’เน€เธเธเน€เธยเน€เธยเน€เธย"
     ];
     return readOnlyPatterns.some(pattern => normalized.includes(pattern));
 }
@@ -1000,7 +1000,7 @@ function validateQwenPatch(
 
     const normalizedIntent = userIntent.toLowerCase();
     const explicitlyRequestedFile = !!filePath && normalizedIntent.includes(filePath.toLowerCase());
-    const explicitlyLargeRewrite = /rewrite|large|full|entire|เธ—เธฑเนเธเนเธเธฅเน|เน€เธเธตเธขเธเนเธซเธกเนเธ—เธฑเนเธเธซเธกเธ”/i.test(userIntent);
+    const explicitlyLargeRewrite = /rewrite|large|full|entire|เน€เธโ€”เน€เธเธ‘เน€เธยเน€เธยเน€เธยเน€เธยเน€เธเธ…เน€เธย|เน€เธโฌเน€เธยเน€เธเธ•เน€เธเธเน€เธยเน€เธยเน€เธเธเน€เธเธเน€เธยเน€เธโ€”เน€เธเธ‘เน€เธยเน€เธยเน€เธเธเน€เธเธเน€เธโ€/i.test(userIntent);
     const blockedPathPatterns = [
         ".env",
         "secrets",
@@ -1294,8 +1294,8 @@ ${JSON.stringify(invalidPayload, null, 2)}`
 function extractJsonFromString(str: string): any {
     // Remove think blocks and special tags if any
     let cleaned = str.replace(/<think>[\s\S]*?<\/think>/gi, "");
-    cleaned = cleaned.replace(/<๏ฝ๏ฝDSML๏ฝ๏ฝthought>[\s\S]*?<\/thought>/gi, "");
-    cleaned = cleaned.replace(/<๏ฝ๏ฝDSML๏ฝ๏ฝthought>/g, ""); // strip raw prefix tags if not closed
+    cleaned = cleaned.replace(/<เนเธยเนเธยDSMLเนเธยเนเธยthought>[\s\S]*?<\/thought>/gi, "");
+    cleaned = cleaned.replace(/<เนเธยเนเธยDSMLเนเธยเนเธยthought>/g, ""); // strip raw prefix tags if not closed
     cleaned = cleaned.replace(/<\|[\s\S]*?\|>/g, ""); // strip other special tokens
 
     // Locate the first { and the last }
@@ -1737,6 +1737,681 @@ Expected JSON shape:
         await updateGatewayRequest(requestId, deepseekRes.status, callLatencyMs);
     }
 
+    static async handleQwenOnlyLowRisk(req: Request, res: ExpressResponse): Promise<any> {
+        const requestId = (req as any).requestId || crypto.randomUUID();
+        const startTime = Date.now();
+        const clientHeaders: Record<string, string> = {
+            "user-agent": req.header("user-agent") || "railway-ai-gateway"
+        };
+
+        const messages = req.body.messages || [];
+        const isStream = !!req.body.stream;
+        const clientModel = req.body?.model || "qwen-only-low-risk";
+        const qwenOnlyLowRiskEnabled = config.qwenOnlyLowRiskEnabled === true;
+        const qwenProvider = providerRegistry.getProvider("qwen-local") as QwenLocalProvider;
+        const userIntent = getLastRealUserInstruction(messages);
+        const codeEditIntent = isLikelyCodeEditTask(userIntent) || hasUsefulCodeContext(messages) || hasToolResults(messages);
+        const highRiskKeywordPattern = /auth|security|payment|database|migration/i;
+        const hasHighRiskKeywords = highRiskKeywordPattern.test(`${userIntent}\n${req.body?.system || ""}\n${JSON.stringify(messages)}`);
+        const multipleFilesInvolved = messages.filter((msg: any) => Array.isArray(msg.content) && msg.content.some((block: any) => block?.type === "tool_result")).length > 1;
+
+        let qwenOnlyUsed = false;
+        let qwenOnlyRejectedReason = "";
+        let finalProvider = "none";
+        let confidenceRiskLevel: ConfidenceRiskLevel = "high";
+        let buildCheckStatus = "not_run";
+        let qwenDraftMode: QwenDraftMode = "empty";
+        let qwenDraftChars = 0;
+        let qwenDraftWeak = true;
+        let qwenRetryUsed = false;
+        let qwenPatchValid = false;
+        let fallbackReason = "";
+        let fileContextSource: FileContextSource = "none";
+        let directEditEligible = !codeEditIntent;
+        let qwenDelegationMode = codeEditIntent ? "qwen_only_low_risk_code_edit" : "qwen_only_low_risk_chat";
+        let qwenInputTokens = 0;
+        let qwenOutputTokens = 0;
+        let qwenLatencyMs = 0;
+        let qwenAnchorCandidateCount = 0;
+        let qwenAnchorId: string | undefined = undefined;
+        let qwenPatchMode = codeEditIntent ? "code_draft" : "direct_chat";
+        let qwenPatchReason = "";
+        let validatedDraft: ValidatedQwenCodeDraft = { ok: false, reason: "not_parsed" };
+        let draftText = "";
+        let rawFileContent = "";
+        let targetFile = "";
+        let focused = { context: "", lines: 0, chars: 0, targetSymbol: "unknown" };
+        let anchorCandidates: AnchorCandidate[] = [];
+        let resolvedConfig: { apiUrl: string; modelName: string; authHeader: string; timeoutMs: number; providerId?: string; providerType?: string } | undefined;
+
+        if (!qwenOnlyLowRiskEnabled) {
+            qwenOnlyRejectedReason = "feature_disabled";
+            confidenceRiskLevel = "high";
+            console.log(JSON.stringify({
+                time: new Date().toISOString(),
+                requestId,
+                mode: "qwen-only-low-risk",
+                clientModel,
+                qwenOnlyUsed: false,
+                qwenOnlyRejectedReason,
+                finalProvider,
+                deepseekFallbackUsed: false,
+                confidence_risk_level: confidenceRiskLevel,
+                build_check_status: buildCheckStatus
+            }));
+            await updateGatewayRequest(requestId, 403, Date.now() - startTime);
+            return res.status(403).json({
+                error: {
+                    type: "permission_error",
+                    message: "Qwen-only low-risk mode is disabled"
+                }
+            });
+        }
+
+        if (!qwenProvider) {
+            qwenOnlyRejectedReason = "qwen_provider_not_registered";
+            confidenceRiskLevel = "high";
+            console.log(JSON.stringify({
+                time: new Date().toISOString(),
+                requestId,
+                mode: "qwen-only-low-risk",
+                clientModel,
+                qwenOnlyUsed: false,
+                qwenOnlyRejectedReason,
+                finalProvider,
+                deepseekFallbackUsed: false,
+                confidence_risk_level: confidenceRiskLevel,
+                build_check_status: buildCheckStatus
+            }));
+            await updateGatewayRequest(requestId, 503, Date.now() - startTime);
+            return res.status(503).json({
+                error: {
+                    type: "server_error",
+                    message: "Qwen local provider is not registered"
+                }
+            });
+        }
+
+        resolvedConfig = await qwenProvider.resolveRuntimeConfig();
+        const activeModelName = resolvedConfig.modelName;
+        const qwenMaxTokens = clampNumber(config.qwenLocalMaxTokens ?? 32000, 512, 32000);
+
+        if (codeEditIntent) {
+            targetFile = getTargetFileFromRecentToolUse(messages);
+            if (targetFile) {
+                const extracted = getFileContentFromToolResults(messages, targetFile);
+                if (extracted.content && extracted.isExact) {
+                    rawFileContent = extracted.content;
+                    fileContextSource = "tool_result_exact";
+                }
+
+                if (!rawFileContent && config.allowRailwayDiskFileContext) {
+                    if (fs.existsSync(targetFile)) {
+                        try {
+                            rawFileContent = fs.readFileSync(targetFile, "utf-8");
+                            fileContextSource = "disk_exact";
+                        } catch (error) {
+                            console.error("Failed to read raw target file content for Qwen-only low-risk prompt", error);
+                        }
+                    }
+                }
+
+                if (!rawFileContent && extracted.content) {
+                    rawFileContent = extracted.content;
+                    fileContextSource = "tool_result_partial";
+                }
+            }
+
+            if (!rawFileContent) {
+                qwenOnlyRejectedReason = "Qwen-only rejected: missing exact context / high risk. Use qwen-smart or deepseek-v4-flash.";
+                confidenceRiskLevel = "high";
+                console.log(JSON.stringify({
+                    time: new Date().toISOString(),
+                    requestId,
+                    mode: "qwen-only-low-risk",
+                    clientModel,
+                    qwenOnlyUsed: false,
+                    qwenOnlyRejectedReason,
+                    finalProvider,
+                    deepseekFallbackUsed: false,
+                    confidence_risk_level: confidenceRiskLevel,
+                    build_check_status: buildCheckStatus,
+                    fileContextSource,
+                    targetFile,
+                    hasExactOriginalFileContent: false,
+                    directEditEligible,
+                    qwenDelegationMode
+                }));
+                await updateGatewayRequest(requestId, 403, Date.now() - startTime);
+                return res.status(403).json({
+                    error: {
+                        type: "permission_error",
+                        message: qwenOnlyRejectedReason
+                    }
+                });
+            }
+
+            const hasExactOriginalFileContent = rawFileContent.length > 0 && (fileContextSource === "tool_result_exact" || fileContextSource === "disk_exact");
+            if (!hasExactOriginalFileContent || hasHighRiskKeywords || multipleFilesInvolved) {
+                qwenOnlyRejectedReason = "Qwen-only rejected: missing exact context / high risk. Use qwen-smart or deepseek-v4-flash.";
+                confidenceRiskLevel = "high";
+                buildCheckStatus = "failed";
+                console.log(JSON.stringify({
+                    time: new Date().toISOString(),
+                    requestId,
+                    mode: "qwen-only-low-risk",
+                    clientModel,
+                    qwenOnlyUsed: false,
+                    qwenOnlyRejectedReason,
+                    finalProvider,
+                    deepseekFallbackUsed: false,
+                    confidence_risk_level: confidenceRiskLevel,
+                    build_check_status: buildCheckStatus,
+                    fileContextSource,
+                    targetFile,
+                    hasExactOriginalFileContent,
+                    directEditEligible,
+                    qwenDelegationMode
+                }));
+                await updateGatewayRequest(requestId, 403, Date.now() - startTime);
+                return res.status(403).json({
+                    error: {
+                        type: "permission_error",
+                        message: qwenOnlyRejectedReason
+                    }
+                });
+            }
+
+            const latestUserIntent = getLastRealUserInstruction(messages);
+            focused = extractFocusedCodeContext(rawFileContent, latestUserIntent);
+            anchorCandidates = buildAnchorCandidates(focused.context, rawFileContent);
+            qwenAnchorCandidateCount = anchorCandidates.length;
+            const anchorCandidateText = formatAnchorCandidates(anchorCandidates);
+            const qwenSystemPrompt = `You are a code writer only.
+Write the smallest code block that satisfies the requested change.
+Use existing project style.
+Prefer existing functions, native APIs, standard library, and installed dependencies.
+Do not add abstractions unless required.
+Do not choose line numbers.
+Do not output patches.
+Do not output unified diff.
+Do not output FIND/REPLACE.
+Do not output markdown.
+Do not output explanations.
+Return JSON only with target_file, target_symbol, anchor_id, change_summary, new_code.`;
+
+            const qwenBody = {
+                system: qwenSystemPrompt,
+                messages: [
+                    {
+                        role: "user",
+                        content: `TARGET_FILE: ${targetFile}
+
+FOCUSED_CODE_CONTEXT:
+${focused.context}
+
+ANCHOR_CANDIDATES:
+${anchorCandidateText || "NONE"}
+
+Task: Write a replacement/new code block for this requested change.
+
+Latest user intent preview: ${latestUserIntent}
+
+Return exactly:
+{"target_file":"${targetFile}","target_symbol":"${focused.targetSymbol}","anchor_id":"A01","change_summary":"short summary","new_code":"replacement code only"}
+
+Rules:
+- Return JSON only.
+- Do not output old_anchor.
+- Do not copy anchor text manually.
+- anchor_id MUST be one of ANCHOR_CANDIDATES.
+- Do not invent anchor_id.
+- If ANCHOR_CANDIDATES is NONE, use anchor_id "".
+- If no candidate is relevant, choose the nearest safe candidate from ANCHOR_CANDIDATES.
+- Do not output markdown, diff, FIND/REPLACE, line numbers, or tool_use.`
+                    }
+                ],
+                stream: false,
+                max_tokens: Math.min(qwenMaxTokens, 1000),
+                temperature: 0.15,
+                model: activeModelName
+            };
+
+            const qwenStartTime = Date.now();
+            const qwenRes = await qwenProvider.handleRequest(qwenBody, clientHeaders);
+            qwenLatencyMs = Date.now() - qwenStartTime;
+
+            if (!qwenRes.ok) {
+                qwenOnlyRejectedReason = `Qwen-only rejected: qwen provider returned ${qwenRes.status}`;
+                confidenceRiskLevel = "high";
+                buildCheckStatus = "failed";
+                console.log(JSON.stringify({
+                    time: new Date().toISOString(),
+                    requestId,
+                    mode: "qwen-only-low-risk",
+                    clientModel,
+                    qwenOnlyUsed: false,
+                    qwenOnlyRejectedReason,
+                    finalProvider,
+                    deepseekFallbackUsed: false,
+                    confidence_risk_level: confidenceRiskLevel,
+                    build_check_status: buildCheckStatus,
+                    fileContextSource,
+                    targetFile,
+                    hasExactOriginalFileContent,
+                    qwenLatencyMs,
+                    qwenDelegationMode
+                }));
+                await updateGatewayRequest(requestId, 503, Date.now() - startTime);
+                return res.status(503).json({
+                    error: {
+                        type: "api_error",
+                        message: qwenOnlyRejectedReason
+                    }
+                });
+            }
+
+            const qwenData = await qwenRes.json();
+            const qwenText = Array.isArray(qwenData?.content)
+                ? (qwenData.content.find((block: any) => block?.type === "text")?.text || "")
+                : "";
+            draftText = qwenText;
+            qwenDraftMode = detectQwenDraftMode(draftText);
+            qwenDraftChars = draftText.length;
+            qwenPatchMode = "code_draft";
+            qwenDraftWeak = false;
+            qwenPatchValid = true;
+            qwenPatchReason = "qwen_code_draft_valid";
+            qwenInputTokens = qwenData?.usage?.input_tokens || 0;
+            qwenOutputTokens = qwenData?.usage?.output_tokens || 0;
+            validatedDraft = validateQwenCodeDraft(draftText, targetFile, rawFileContent, focused.context, anchorCandidates);
+            qwenPatchValid = validatedDraft.ok;
+            qwenDraftWeak = !qwenPatchValid;
+            qwenPatchReason = validatedDraft.reason;
+            fallbackReason = validatedDraft.reason;
+            qwenAnchorId = validatedDraft.draft?.anchor_id;
+            const patchLarge = qwenDraftChars >= 2000;
+            const actualBuildCheckStatus = !qwenPatchValid
+                ? "failed"
+                : (multipleFilesInvolved || hasHighRiskKeywords || patchLarge)
+                    ? "failed"
+                    : "passed";
+            buildCheckStatus = actualBuildCheckStatus;
+            const confidence = evaluateConfidence({
+                hasExactOriginalFileContent: true,
+                fileContextSource,
+                qwenDraftMode,
+                qwenPatchValid,
+                qwenDraftWeak,
+                qwenRetryUsed,
+                fallbackReason,
+                directEditEligible: false,
+                anchorCandidateCount: qwenAnchorCandidateCount,
+                qwenDraftChars,
+                qwenInputTokens,
+                qwenOutputTokens,
+                multipleFilesInvolved,
+                sensitiveKeywordsPresent: hasHighRiskKeywords,
+                patchLarge,
+                buildCheckStatus: actualBuildCheckStatus
+            });
+            confidenceRiskLevel = confidence.riskLevel;
+
+            if (!qwenPatchValid) {
+                qwenOnlyRejectedReason = `Qwen-only rejected: validator failed (${validatedDraft.reason}). Use qwen-smart or deepseek-v4-flash.`;
+            } else if (actualBuildCheckStatus === "failed") {
+                qwenOnlyRejectedReason = "Qwen-only rejected: missing exact context / high risk. Use qwen-smart or deepseek-v4-flash.";
+            } else if (!confidence.canSkipDeepSeekDryRun) {
+                qwenOnlyRejectedReason = `Qwen-only rejected: ${confidence.reasons[0] || "confidence_not_low"}. Use qwen-smart or deepseek-v4-flash.`;
+            }
+
+            if (!qwenPatchValid || actualBuildCheckStatus === "failed" || !confidence.canSkipDeepSeekDryRun) {
+                finalProvider = "qwen-local";
+                console.log(JSON.stringify({
+                    time: new Date().toISOString(),
+                    requestId,
+                    mode: "qwen-only-low-risk",
+                    clientModel,
+                    qwenOnlyUsed: false,
+                    qwenOnlyRejectedReason,
+                    finalProvider,
+                    deepseekFallbackUsed: false,
+                    confidence_risk_level: confidenceRiskLevel,
+                    build_check_status: buildCheckStatus,
+                    fileContextSource,
+                    targetFile,
+                    hasExactOriginalFileContent: true,
+                    qwenDraftMode,
+                    qwenDraftChars,
+                    qwenDraftWeak,
+                    qwenPatchValid,
+                    qwenPatchReason,
+                    qwenAnchorCandidateCount,
+                    qwenAnchorId,
+                    qwenLatencyMs,
+                    qwenDelegationMode
+                }));
+                await insertModelCall({
+                    requestId,
+                    provider: "qwen-local",
+                    model: activeModelName,
+                    inputTokens: qwenInputTokens,
+                    outputTokens: qwenOutputTokens,
+                    latencyMs: qwenLatencyMs,
+                    qwenDraftMode,
+                    qwenDraftChars,
+                    qwenDraftWeak,
+                    qwenRetryUsed,
+                    qwenPatchMode,
+                    qwenPatchValid,
+                    fallbackReason,
+                    fileContextSource,
+                    qwenDelegationMode,
+                    directEditEligible,
+                    qwenAnchorId,
+                    qwenAnchorCandidateCount
+                });
+                await updateGatewayRequest(requestId, 403, Date.now() - startTime);
+                return res.status(403).json({
+                    error: {
+                        type: "permission_error",
+                        message: qwenOnlyRejectedReason
+                    }
+                });
+            }
+
+            qwenOnlyUsed = true;
+            finalProvider = "qwen-local";
+            await insertModelCall({
+                requestId,
+                provider: "qwen-local",
+                model: activeModelName,
+                inputTokens: qwenInputTokens,
+                outputTokens: qwenOutputTokens,
+                latencyMs: qwenLatencyMs,
+                qwenDraftMode,
+                qwenDraftChars,
+                qwenDraftWeak,
+                qwenRetryUsed,
+                qwenPatchMode,
+                qwenPatchValid,
+                fallbackReason,
+                fileContextSource,
+                qwenDelegationMode,
+                directEditEligible,
+                qwenAnchorId,
+                qwenAnchorCandidateCount
+            });
+
+            const qwenOnlyResponse = {
+                id: "msg_qwen_only_" + Math.random().toString(36).substring(7),
+                type: "message",
+                role: "assistant",
+                content: draftText ? [{ type: "text", text: draftText }] : [{ type: "text", text: "" }],
+                model: activeModelName,
+                stop_reason: "end_turn",
+                stop_sequence: null,
+                usage: {
+                    input_tokens: qwenInputTokens,
+                    output_tokens: qwenOutputTokens
+                }
+            };
+
+            const totalLatencyMs = Date.now() - startTime;
+            await updateGatewayRequest(requestId, 200, totalLatencyMs);
+            console.log(JSON.stringify({
+                time: new Date().toISOString(),
+                requestId,
+                mode: "qwen-only-low-risk",
+                clientModel,
+                qwenOnlyUsed,
+                qwenOnlyRejectedReason: "",
+                finalProvider,
+                deepseekFallbackUsed: false,
+                confidence_risk_level: confidenceRiskLevel,
+                build_check_status: buildCheckStatus,
+                fileContextSource,
+                targetFile,
+                hasExactOriginalFileContent: true,
+                qwenDraftMode,
+                qwenDraftChars,
+                qwenDraftWeak,
+                qwenPatchValid,
+                qwenPatchReason,
+                qwenAnchorCandidateCount,
+                qwenAnchorId,
+                qwenLatencyMs,
+                qwenDelegationMode
+            }));
+
+            if (isStream) {
+                res.setHeader("content-type", "text/event-stream");
+                res.setHeader("cache-control", "no-cache");
+                res.setHeader("x-accel-buffering", "no");
+                res.setHeader("connection", "keep-alive");
+                res.write(`data: ${JSON.stringify(qwenOnlyResponse)}\n\n`);
+                res.end();
+            } else {
+                res.json(qwenOnlyResponse);
+            }
+            return;
+        }
+
+        if (hasHighRiskKeywords) {
+            qwenOnlyRejectedReason = "Qwen-only rejected: missing exact context / high risk. Use qwen-smart or deepseek-v4-flash.";
+            confidenceRiskLevel = "high";
+            console.log(JSON.stringify({
+                time: new Date().toISOString(),
+                requestId,
+                mode: "qwen-only-low-risk",
+                clientModel,
+                qwenOnlyUsed: false,
+                qwenOnlyRejectedReason,
+                finalProvider,
+                deepseekFallbackUsed: false,
+                confidence_risk_level: confidenceRiskLevel,
+                build_check_status: buildCheckStatus,
+                qwenDelegationMode
+            }));
+            await updateGatewayRequest(requestId, 403, Date.now() - startTime);
+            return res.status(403).json({
+                error: {
+                    type: "permission_error",
+                    message: qwenOnlyRejectedReason
+                }
+            });
+        }
+
+        const upstream = await qwenProvider.handleRequest({ ...req.body, model: activeModelName }, clientHeaders);
+        const qwenResponseStartTime = Date.now();
+        const contentType = upstream.headers.get("content-type");
+        if (contentType) {
+            res.setHeader("content-type", contentType);
+        }
+        res.status(upstream.status);
+
+        if (upstream.status >= 400) {
+            const errorText = await upstream.text();
+            qwenOnlyRejectedReason = `Qwen-only rejected: qwen provider returned ${upstream.status}`;
+            confidenceRiskLevel = "medium";
+            console.log(JSON.stringify({
+                time: new Date().toISOString(),
+                requestId,
+                mode: "qwen-only-low-risk",
+                clientModel,
+                qwenOnlyUsed: false,
+                qwenOnlyRejectedReason,
+                finalProvider,
+                deepseekFallbackUsed: false,
+                confidence_risk_level: confidenceRiskLevel,
+                build_check_status: buildCheckStatus,
+                qwenDelegationMode
+            }));
+            await updateGatewayRequest(requestId, upstream.status, Date.now() - startTime);
+            return res.status(upstream.status).json({
+                error: {
+                    type: "api_error",
+                    message: errorText || qwenOnlyRejectedReason
+                }
+            });
+        }
+
+        if (isStream && upstream.body) {
+            res.setHeader("cache-control", "no-cache");
+            res.setHeader("x-accel-buffering", "no");
+            res.setHeader("connection", "keep-alive");
+
+            const reader = upstream.body.getReader();
+            const decoder = new TextDecoder();
+            let streamBuffer = "";
+            let inputTokens = 0;
+            let outputTokens = 0;
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                res.write(Buffer.from(value));
+
+                streamBuffer += decoder.decode(value, { stream: true });
+                const lines = streamBuffer.split("\n");
+                streamBuffer = lines.pop() || "";
+
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (!trimmed.startsWith("data: ")) continue;
+                    try {
+                        const dataJson = JSON.parse(trimmed.slice(6));
+                        if (dataJson.message?.usage) {
+                            const usage = dataJson.message.usage;
+                            if (usage.input_tokens) inputTokens = usage.input_tokens;
+                            if (usage.output_tokens) outputTokens = usage.output_tokens;
+                        }
+                        if (dataJson.usage) {
+                            const usage = dataJson.usage;
+                            if (usage.input_tokens) inputTokens = usage.input_tokens;
+                            if (usage.prompt_tokens) inputTokens = usage.prompt_tokens;
+                            if (usage.output_tokens) outputTokens = usage.output_tokens;
+                            if (usage.completion_tokens) outputTokens = usage.completion_tokens;
+                        }
+                    } catch {
+                    }
+                }
+            }
+
+            res.end();
+            const totalLatencyMs = Date.now() - startTime;
+            await insertModelCall({
+                requestId,
+                provider: "qwen-local",
+                model: activeModelName,
+                inputTokens,
+                outputTokens,
+                latencyMs: Date.now() - qwenResponseStartTime,
+                qwenDraftMode: "direct_chat",
+                qwenDraftChars: 0,
+                qwenDraftWeak: false,
+                qwenRetryUsed: false,
+                qwenPatchMode: "direct_chat",
+                qwenPatchValid: true,
+                fallbackReason: "qwen_only_low_risk_direct_chat",
+                fileContextSource: "none",
+                qwenDelegationMode,
+                directEditEligible,
+                qwenAnchorCandidateCount: 0
+            });
+            await updateGatewayRequest(requestId, upstream.status, totalLatencyMs);
+            confidenceRiskLevel = "low";
+            qwenOnlyUsed = true;
+            finalProvider = "qwen-local";
+            console.log(JSON.stringify({
+                time: new Date().toISOString(),
+                requestId,
+                mode: "qwen-only-low-risk",
+                clientModel,
+                qwenOnlyUsed,
+                qwenOnlyRejectedReason: "",
+                finalProvider,
+                deepseekFallbackUsed: false,
+                confidence_risk_level: confidenceRiskLevel,
+                build_check_status: buildCheckStatus,
+                qwenDelegationMode
+            }));
+            return;
+        }
+
+        const text = await upstream.text();
+        let responseBody: any;
+        try {
+            responseBody = JSON.parse(text);
+        } catch {
+            responseBody = null;
+        }
+
+        const usageInputTokens = responseBody?.usage?.input_tokens || responseBody?.usage?.prompt_tokens || 0;
+        const usageOutputTokens = responseBody?.usage?.output_tokens || responseBody?.usage?.completion_tokens || 0;
+        const totalLatencyMs = Date.now() - startTime;
+        await insertModelCall({
+            requestId,
+            provider: "qwen-local",
+            model: activeModelName,
+            inputTokens: usageInputTokens,
+            outputTokens: usageOutputTokens,
+            latencyMs: Date.now() - qwenResponseStartTime,
+            qwenDraftMode: codeEditIntent ? "code_draft" : "direct_chat",
+            qwenDraftChars: draftText.length,
+            qwenDraftWeak: codeEditIntent ? !qwenPatchValid : false,
+            qwenRetryUsed,
+            qwenPatchMode,
+            qwenPatchValid: codeEditIntent ? qwenPatchValid : true,
+            fallbackReason: qwenPatchReason || "qwen_only_low_risk_direct_chat",
+            fileContextSource,
+            qwenDelegationMode,
+            directEditEligible,
+            qwenAnchorId,
+            qwenAnchorCandidateCount
+        });
+        await updateGatewayRequest(requestId, upstream.status, totalLatencyMs);
+        qwenOnlyUsed = true;
+        confidenceRiskLevel = codeEditIntent ? confidenceRiskLevel : "low";
+        finalProvider = "qwen-local";
+        console.log(JSON.stringify({
+            time: new Date().toISOString(),
+            requestId,
+            mode: "qwen-only-low-risk",
+            clientModel,
+            qwenOnlyUsed,
+            qwenOnlyRejectedReason: "",
+            finalProvider,
+            deepseekFallbackUsed: false,
+            confidence_risk_level: confidenceRiskLevel,
+            build_check_status: buildCheckStatus,
+            qwenDelegationMode,
+            fileContextSource,
+            qwenPatchMode,
+            qwenPatchValid,
+            qwenDraftMode,
+            qwenDraftChars,
+            qwenDraftWeak,
+            qwenAnchorCandidateCount,
+            qwenAnchorId
+        }));
+
+        if (responseBody && upstream.status === 200) {
+            return res.json(responseBody);
+        }
+
+        if (responseBody) {
+            return res.status(upstream.status).json(responseBody);
+        }
+
+        return res.status(upstream.status).json({
+            error: {
+                type: "upstream_error",
+                message: text
+            }
+        });
+    }
+
     static async handleTwinModels(req: Request, res: ExpressResponse): Promise<void> {
         const requestId = (req as any).requestId || crypto.randomUUID();
         const clientHeaders: Record<string, string> = {
@@ -1756,7 +2431,7 @@ Expected JSON shape:
                     content: [
                         {
                             type: "text",
-                            text: "The Qwen-generated Edit tool result is available. Provide a minimal final response: เนเธเนเนเธฅเนเธง plus 1-2 short bullets. Do not explain broadly."
+                            text: "The Qwen-generated Edit tool result is available. Provide a minimal final response: เน€เธยเน€เธยเน€เธยเน€เธยเน€เธเธ…เน€เธยเน€เธเธ plus 1-2 short bullets. Do not explain broadly."
                         }
                     ]
                 }
@@ -2253,3 +2928,6 @@ Do not output tool_use.`);
         await this.forwardToDeepSeek(finalBody, clientHeaders, res, isStream, requestId, qwenSavings);
     }
 }
+
+
+

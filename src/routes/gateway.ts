@@ -1,4 +1,4 @@
-import { Router } from "express";
+﻿import { Router } from "express";
 import crypto from "crypto";
 import path from "path";
 import { authMiddleware } from "../auth.js";
@@ -487,7 +487,58 @@ gatewayRouter.post("/v1/messages", authMiddleware, async (req, res) => {
         console.error("Configurable provider routing error:", e);
     }
 
-    if (clientModel === "hybrid-flow" || clientModel === "qwen-smart" || clientModel === "qwen-only-low-risk") {
+    if (clientModel === "qwen-only-low-risk") {
+        logRequest({
+            type: "request",
+            requestId,
+            method: req.method,
+            path: req.path,
+            clientModel,
+            upstreamModel: "qwen-only-low-risk",
+            stream: isStream,
+            provider: "qwen-only-orchestrator"
+        });
+        try {
+            (req as any).requestId = requestId;
+            await OrchestratorService.handleQwenOnlyLowRisk(req, res);
+            logRequest({
+                type: "response",
+                requestId,
+                method: req.method,
+                path: req.path,
+                clientModel,
+                upstreamModel: "qwen-only-low-risk",
+                status: res.statusCode || 200,
+                latencyMs: Date.now() - startTime,
+                stream: isStream,
+                provider: "qwen-only-orchestrator"
+            });
+        } catch (err: any) {
+            logRequest({
+                type: "response",
+                requestId,
+                method: req.method,
+                path: req.path,
+                clientModel,
+                upstreamModel: "qwen-only-low-risk",
+                status: 500,
+                latencyMs: Date.now() - startTime,
+                stream: isStream,
+                errorMessage: err.message,
+                provider: "qwen-only-orchestrator"
+            });
+            await updateGatewayRequest(requestId, 500, Date.now() - startTime);
+            res.status(500).json({
+                error: {
+                    type: "gateway_error",
+                    message: err.message || "Unknown error inside Qwen-only low-risk orchestrator"
+                }
+            });
+        }
+        return;
+    }
+
+    if (clientModel === "hybrid-flow" || clientModel === "qwen-smart") {
         logRequest({
             type: "request",
             requestId,
@@ -1016,3 +1067,5 @@ gatewayRouter.get("/api/admin/ai-models", adminAuthMiddleware, async (req, res) 
         res.status(500).json({ error: err.message });
     }
 });
+
+
