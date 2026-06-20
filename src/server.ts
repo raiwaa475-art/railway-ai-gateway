@@ -3,6 +3,7 @@ import cors from "cors";
 import path from "path";
 import { config } from "./config/env.js";
 import { gatewayRouter } from "./routes/gateway.js";
+import "./routes/qwen-metrics.js";
 
 const app = express();
 
