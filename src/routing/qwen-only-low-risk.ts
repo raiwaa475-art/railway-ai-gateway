@@ -384,11 +384,10 @@ async function recordModelCall(params: {
     });
 }
 
-function detectFakeToolJson(text: string): boolean {
+function parseFakeToolJson(text: string): FakeJsonToolCall | null {
     const trimmed = (text || "").trim();
-    if (!trimmed) return false;
+    if (!trimmed) return null;
 
-    // Check if the entire text is a JSON code block
     let cleaned = trimmed;
     if (cleaned.startsWith("```")) {
         const lines = cleaned.split("\n");
@@ -405,63 +404,116 @@ function detectFakeToolJson(text: string): boolean {
         try {
             const parsed = JSON.parse(cleaned);
             if (parsed && typeof parsed === "object") {
-                const name = parsed.name || parsed.tool_use || parsed.tool || parsed.tool_name;
-                const args = parsed.arguments || parsed.input || parsed.args || parsed.parameters;
-                if (name && typeof name === "string" && args) {
-                    return true;
+                const name = parsed.name || parsed.tool || parsed.tool_name || parsed.tool_use;
+                const input = parsed.arguments || parsed.input || parsed.args || parsed.parameters;
+                if (name && typeof name === "string" && input !== undefined) {
+                    let parsedInput = input;
+                    if (typeof input === "string") {
+                        try {
+                            parsedInput = JSON.parse(input);
+                        } catch {}
+                    }
+                    return { name, input: parsedInput };
                 }
             }
-        } catch {
-            // ignore JSON parsing failed, try regex
-        }
+        } catch {}
     }
 
-    // Regex check: e.g. {"name": "Write", "arguments": {...}} or similar
-    const namePattern = /["']?name["']?\s*:\s*["'][a-zA-Z0-9_\-]+["']/i;
+    const firstBrace = cleaned.indexOf("{");
+    const lastBrace = cleaned.lastIndexOf("}");
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+        const jsonStr = cleaned.slice(firstBrace, lastBrace + 1);
+        try {
+            const parsed = JSON.parse(jsonStr);
+            if (parsed && typeof parsed === "object") {
+                const name = parsed.name || parsed.tool || parsed.tool_name || parsed.tool_use;
+                const input = parsed.arguments || parsed.input || parsed.args || parsed.parameters;
+                if (name && typeof name === "string" && input !== undefined) {
+                    let parsedInput = input;
+                    if (typeof input === "string") {
+                        try {
+                            parsedInput = JSON.parse(input);
+                        } catch {}
+                    }
+                    return { name, input: parsedInput };
+                }
+            }
+        } catch {}
+    }
+
+    const namePattern = /["']?name["']?\s*:\s*["']([a-zA-Z0-9_\-]+)["']/i;
     const argumentsPattern = /["']?arguments["']?\s*:/i;
-    
-    if (namePattern.test(cleaned) && argumentsPattern.test(cleaned)) {
-        return true;
+    const nameMatch = namePattern.exec(cleaned);
+    if (nameMatch && argumentsPattern.test(cleaned)) {
+        return { name: nameMatch[1], input: {} };
     }
 
-    return false;
+    const toolPattern = /["']?tool["']?\s*:\s*["']([a-zA-Z0-9_\-]+)["']/i;
+    const inputPattern = /["']?input["']?\s*:/i;
+    const toolMatch = toolPattern.exec(cleaned);
+    if (toolMatch && inputPattern.test(cleaned)) {
+        return { name: toolMatch[1], input: {} };
+    }
+
+    return null;
 }
 
-function isDangerousTool(name: string, input: any): boolean {
-    const lowerName = String(name || "").toLowerCase();
+function detectFakeToolJson(text: string): boolean {
+    return parseFakeToolJson(text) !== null;
+}
+
+interface FakeJsonToolCall {
+    name: string;
+    input: any;
+}
+
+function getCanonicalToolCategory(name: string): "read" | "ls" | "glob" | "grep" | "write" | "edit" | "multiedit" | "bash" | "unknown" {
+    const norm = String(name || "").toLowerCase();
     
-    const isWrite = lowerName.includes("write");
-    const isEdit = lowerName.includes("edit") || lowerName.includes("replace_file_content");
-    if (isWrite || isEdit) {
-        return true;
+    if (norm === "write" || norm === "writefile" || norm === "write_file" || norm === "write_to_file") {
+        return "write";
+    }
+    if (norm === "edit" || norm === "editfile" || norm === "edit_file" || norm === "replace_file_content") {
+        return "edit";
+    }
+    if (norm === "multiedit" || norm === "multi_edit" || norm === "multi_replace_file_content") {
+        return "multiedit";
+    }
+    if (norm === "bash" || norm === "run_command" || norm === "execute_command" || norm === "shell" || norm === "cmd") {
+        return "bash";
     }
     
-    const isBash = lowerName.includes("bash") || lowerName.includes("run_command") || lowerName.includes("shell") || lowerName === "cmd";
-    if (isBash) {
-        const command = String(input?.command || input?.CommandLine || input?.cmd || "").toLowerCase();
-        if (command) {
-            const dangerousPatterns = [
-                /\b(rm|mv|cp|chmod|chown|ln|mkdir|rmdir|touch|dd|tar|zip|unzip|gzip|gunzip)\b/,
-                /\bgit\s+(commit|push|reset|revert|checkout|clean|branch\s+-d|branch\s+-D|merge|rebase|pull|add)\b/,
-                />{1,2}\s*\S+/,
-                /\b(npm|yarn|pnpm|pip|pip3|apt|apt-get|brew|yum|dnf|apk|gem|cargo)\s+(install|uninstall|update|upgrade|add|remove|prune)\b/,
-                /\b(nano|vim|vi|emacs|sed|awk|perl)\b/
-            ];
-            
-            if (dangerousPatterns.some(pattern => pattern.test(command))) {
-                return true;
-            }
-        }
+    if (norm === "read" || norm === "readfile" || norm === "read_file" || norm === "viewfile" || norm === "view_file" || norm === "viewoutline" || norm === "view_outline") {
+        return "read";
+    }
+    if (norm === "ls" || norm === "listdir" || norm === "list_dir" || norm === "dir") {
+        return "ls";
+    }
+    if (norm === "glob" || norm === "findfiles" || norm === "find_files") {
+        return "glob";
+    }
+    if (norm === "grep" || norm === "grepsearch" || norm === "grep_search") {
+        return "grep";
     }
     
-    return false;
+    return "unknown";
+}
+
+function isSafeReadOnlyTool(name: string): boolean {
+    const category = getCanonicalToolCategory(name);
+    return category === "read" || category === "ls" || category === "glob" || category === "grep";
+}
+
+function isDangerousTool(name: string): boolean {
+    const category = getCanonicalToolCategory(name);
+    return category === "write" || category === "edit" || category === "multiedit" || category === "bash";
 }
 
 function hasDangerousToolCall(content: any[]): boolean {
     if (!Array.isArray(content)) return false;
     for (const block of content) {
         if (block?.type === "tool_use") {
-            if (isDangerousTool(block.name, block.input)) {
+            if (isDangerousTool(block.name)) {
                 return true;
             }
         }
@@ -502,6 +554,9 @@ async function forwardToQwenLocal(
             qwenOnlyRejectedReason: "Qwen local provider is not registered",
             qwenToolCallValid: true,
             qwenFakeToolJsonDetected: false,
+            qwenFakeToolJsonConverted: false,
+            requestedToolName: "",
+            blockedToolReason: "",
             finalProvider: "none",
             deepseekFallbackUsed: false,
             confidence_risk_level: "high",
@@ -543,6 +598,9 @@ async function forwardToQwenLocal(
             qwenOnlyRejectedReason: `Qwen local provider returned ${upstream.status}`,
             qwenToolCallValid: true,
             qwenFakeToolJsonDetected: false,
+            qwenFakeToolJsonConverted: false,
+            requestedToolName: "",
+            blockedToolReason: "",
             finalProvider: "none",
             deepseekFallbackUsed: false,
             confidence_risk_level: decision.confidenceRiskLevel,
@@ -628,6 +686,9 @@ async function forwardToQwenLocal(
             qwenOnlyRejectedReason: "",
             qwenToolCallValid: true,
             qwenFakeToolJsonDetected: false,
+            qwenFakeToolJsonConverted: false,
+            requestedToolName: "",
+            blockedToolReason: "",
             finalProvider: "qwen-local",
             deepseekFallbackUsed: false,
             confidence_risk_level: decision.confidenceRiskLevel,
@@ -650,6 +711,9 @@ async function forwardToQwenLocal(
 
     let qwenToolCallValid = true;
     let qwenFakeToolJsonDetected = false;
+    let qwenFakeToolJsonConverted = false;
+    let requestedToolName = "";
+    let blockedToolReason = "";
     let qwenOnlyRejectedReason = "";
     let qwenOnlyUsed = true;
     let finalProvider = "qwen-local";
@@ -659,29 +723,108 @@ async function forwardToQwenLocal(
     if (responseBody && upstream.status === 200) {
         const content = responseBody.content;
         if (Array.isArray(content)) {
-            for (const block of content) {
-                if (block?.type === "text" && detectFakeToolJson(block.text)) {
-                    qwenToolCallValid = false;
-                    qwenFakeToolJsonDetected = true;
-                    qwenOnlyRejectedReason = "qwen_fake_tool_json_detected";
-                    qwenOnlyUsed = false;
-                    finalProvider = "none";
-                    break;
+            let hasFakeJson = false;
+            let fakeCall: FakeJsonToolCall | null = null;
+            let fakeBlockIndex = -1;
+
+            for (let i = 0; i < content.length; i++) {
+                const block = content[i];
+                if (block?.type === "text") {
+                    const parsed = parseFakeToolJson(block.text);
+                    if (parsed) {
+                        hasFakeJson = true;
+                        fakeCall = parsed;
+                        fakeBlockIndex = i;
+                        break;
+                    }
                 }
             }
 
-            if (qwenToolCallValid && decision.intentType === "read_only") {
-                if (hasDangerousToolCall(content)) {
-                    qwenToolCallValid = false;
-                    qwenOnlyRejectedReason = "qwen_dangerous_tool_rejected";
-                    qwenOnlyUsed = false;
-                    finalProvider = "none";
+            if (hasFakeJson && fakeCall) {
+                qwenFakeToolJsonDetected = true;
+                requestedToolName = fakeCall.name;
+
+                const isDangerous = isDangerousTool(fakeCall.name);
+                const isSafe = isSafeReadOnlyTool(fakeCall.name);
+
+                if (decision.intentType === "read_only") {
+                    if (isDangerous) {
+                        qwenToolCallValid = false;
+                        blockedToolReason = "unsafe_tool_in_read_only";
+                        qwenOnlyRejectedReason = "qwen_dangerous_tool_rejected";
+                        qwenOnlyUsed = false;
+                        finalProvider = "none";
+                    } else if (isSafe) {
+                        qwenFakeToolJsonConverted = true;
+                        const newToolUseBlock = {
+                            type: "tool_use",
+                            id: "toolu_qwen_read_only_" + Math.random().toString(36).substring(7),
+                            name: fakeCall.name,
+                            input: fakeCall.input
+                        };
+                        const newContent = [...content];
+                        newContent[fakeBlockIndex] = newToolUseBlock;
+                        validatedBody = {
+                            ...responseBody,
+                            content: newContent,
+                            stop_reason: "tool_use"
+                        };
+                    } else {
+                        qwenToolCallValid = false;
+                        blockedToolReason = "invalid_tool_in_read_only";
+                        qwenOnlyRejectedReason = "qwen_invalid_tool_rejected";
+                        qwenOnlyUsed = false;
+                        finalProvider = "none";
+                    }
+                } else {
+                    qwenFakeToolJsonConverted = true;
+                    const newToolUseBlock = {
+                        type: "tool_use",
+                        id: "toolu_qwen_edit_" + Math.random().toString(36).substring(7),
+                        name: fakeCall.name,
+                        input: fakeCall.input
+                    };
+                    const newContent = [...content];
+                    newContent[fakeBlockIndex] = newToolUseBlock;
+                    validatedBody = {
+                        ...responseBody,
+                        content: newContent,
+                        stop_reason: "tool_use"
+                    };
+                }
+            } else {
+                for (const block of content) {
+                    if (block?.type === "tool_use") {
+                        requestedToolName = block.name;
+                        if (decision.intentType === "read_only") {
+                            if (isDangerousTool(block.name)) {
+                                qwenToolCallValid = false;
+                                blockedToolReason = "unsafe_tool_in_read_only";
+                                qwenOnlyRejectedReason = "qwen_dangerous_tool_rejected";
+                                qwenOnlyUsed = false;
+                                finalProvider = "none";
+                                break;
+                            } else if (!isSafeReadOnlyTool(block.name)) {
+                                qwenToolCallValid = false;
+                                blockedToolReason = "invalid_tool_in_read_only";
+                                qwenOnlyRejectedReason = "qwen_invalid_tool_rejected";
+                                qwenOnlyUsed = false;
+                                finalProvider = "none";
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
     if (!qwenToolCallValid) {
+        let rejectionText = "Qwen-only could not produce a valid tool call. Use qwen-smart.";
+        if (decision.intentType === "read_only" && blockedToolReason === "unsafe_tool_in_read_only") {
+            rejectionText = "Qwen-only rejected: unsafe tool for read-only request. Use qwen-smart.";
+        }
+
         validatedBody = {
             id: "msg_qwen_only_failed_tool_use_" + Math.random().toString(36).substring(7),
             type: "message",
@@ -689,7 +832,7 @@ async function forwardToQwenLocal(
             content: [
                 {
                     type: "text",
-                    text: "Qwen-only could not produce a valid tool call. Use qwen-smart."
+                    text: rejectionText
                 }
             ],
             model: "qwen-only-low-risk",
@@ -725,6 +868,9 @@ async function forwardToQwenLocal(
         qwenOnlyRejectedReason,
         qwenToolCallValid,
         qwenFakeToolJsonDetected,
+        qwenFakeToolJsonConverted,
+        requestedToolName,
+        blockedToolReason,
         finalProvider,
         deepseekFallbackUsed: false,
         confidence_risk_level: decision.confidenceRiskLevel,
@@ -769,6 +915,9 @@ export async function handleQwenOnlyLowRiskRequest(req: Request, res: Response):
             qwenOnlyRejectedReason: "Qwen-only low-risk mode is disabled",
             qwenToolCallValid: true,
             qwenFakeToolJsonDetected: false,
+            qwenFakeToolJsonConverted: false,
+            requestedToolName: "",
+            blockedToolReason: "",
             finalProvider: "none",
             deepseekFallbackUsed: false,
             confidence_risk_level: "high",
@@ -796,6 +945,9 @@ export async function handleQwenOnlyLowRiskRequest(req: Request, res: Response):
             qwenOnlyRejectedReason: QWEN_ONLY_REJECTION_MESSAGE,
             qwenToolCallValid: true,
             qwenFakeToolJsonDetected: false,
+            qwenFakeToolJsonConverted: false,
+            requestedToolName: "",
+            blockedToolReason: "",
             finalProvider: "none",
             deepseekFallbackUsed: false,
             confidence_risk_level: decision.confidenceRiskLevel,
@@ -821,6 +973,9 @@ export async function handleQwenOnlyLowRiskRequest(req: Request, res: Response):
         qwenOnlyRejectedReason: "",
         qwenToolCallValid: true,
         qwenFakeToolJsonDetected: false,
+        qwenFakeToolJsonConverted: false,
+        requestedToolName: "",
+        blockedToolReason: "",
         finalProvider: "qwen-local",
         deepseekFallbackUsed: false,
         confidence_risk_level: decision.confidenceRiskLevel,

@@ -121,7 +121,7 @@ async function runCase(
         }
 
         const decision = classifyQwenOnlyIntent(body);
-        return decision;
+        return { decision, jsonBody: res.jsonBody };
     } finally {
         providerRegistry.getProvider = originalGetProvider as any;
     }
@@ -151,6 +151,7 @@ async function main() {
         messages: [{ role: "user", content: "อ่านไฟล์ html" }]
     }, { status: 200, calls: 1 });
 
+    // read_only + fake JSON Write => rejected with unsafe tool message
     await runCase("read_file_fake_write_json", {
         model: "qwen-only-low-risk",
         stream: false,
@@ -158,7 +159,7 @@ async function main() {
     }, {
         status: 200,
         calls: 1,
-        rejection: "Qwen-only could not produce a valid tool call. Use qwen-smart."
+        rejection: "Qwen-only rejected: unsafe tool for read-only request. Use qwen-smart."
     }, () => {
         return {
             id: "msg_fake_qwen_tool",
@@ -177,6 +178,7 @@ async function main() {
         };
     });
 
+    // read_only + real tool call Write => rejected with unsafe tool message
     await runCase("read_file_dangerous_tool", {
         model: "qwen-only-low-risk",
         stream: false,
@@ -184,7 +186,7 @@ async function main() {
     }, {
         status: 200,
         calls: 1,
-        rejection: "Qwen-only could not produce a valid tool call. Use qwen-smart."
+        rejection: "Qwen-only rejected: unsafe tool for read-only request. Use qwen-smart."
     }, () => {
         return {
             id: "msg_fake_qwen_tool",
@@ -205,7 +207,37 @@ async function main() {
         };
     });
 
-    await runCase("read_file_safe_tool", {
+    // read_only + real tool call Bash => rejected with unsafe tool message
+    await runCase("read_file_dangerous_bash_tool", {
+        model: "qwen-only-low-risk",
+        stream: false,
+        messages: [{ role: "user", content: "อ่านไฟล์" }]
+    }, {
+        status: 200,
+        calls: 1,
+        rejection: "Qwen-only rejected: unsafe tool for read-only request. Use qwen-smart."
+    }, () => {
+        return {
+            id: "msg_fake_qwen_tool",
+            type: "message",
+            role: "assistant",
+            content: [
+                {
+                    type: "tool_use",
+                    id: "toolu_123",
+                    name: "Bash",
+                    input: { command: "cat file.txt" }
+                }
+            ],
+            model: "qwen-local",
+            stop_reason: "tool_use",
+            stop_sequence: null,
+            usage: { input_tokens: 10, output_tokens: 10 }
+        };
+    });
+
+    // read_only + real tool call Read => allowed
+    const caseSafe = await runCase("read_file_safe_tool", {
         model: "qwen-only-low-risk",
         stream: false,
         messages: [{ role: "user", content: "อ่านไฟล์" }]
@@ -231,7 +263,67 @@ async function main() {
             usage: { input_tokens: 10, output_tokens: 10 }
         };
     });
+    assert.equal(caseSafe.jsonBody?.content?.[0]?.type, "tool_use", "read_file_safe_tool content type mismatch");
+    assert.equal(caseSafe.jsonBody?.content?.[0]?.name, "Read", "read_file_safe_tool name mismatch");
 
+    // read_only + fake JSON Read => converted to tool_use
+    const caseConvert = await runCase("read_file_fake_read_json_converted", {
+        model: "qwen-only-low-risk",
+        stream: false,
+        messages: [{ role: "user", content: "อ่านไฟล์" }]
+    }, {
+        status: 200,
+        calls: 1
+    }, () => {
+        return {
+            id: "msg_fake_qwen_tool",
+            type: "message",
+            role: "assistant",
+            content: [
+                {
+                    type: "text",
+                    text: '{"name": "Read", "arguments": {"file_path": "/path/to/file.txt"}}'
+                }
+            ],
+            model: "qwen-local",
+            stop_reason: "end_turn",
+            stop_sequence: null,
+            usage: { input_tokens: 10, output_tokens: 10 }
+        };
+    });
+    assert.equal(caseConvert.jsonBody?.content?.[0]?.type, "tool_use", "fake JSON conversion failed to produce tool_use");
+    assert.equal(caseConvert.jsonBody?.content?.[0]?.name, "Read", "fake JSON conversion name mismatch");
+    assert.deepEqual(caseConvert.jsonBody?.content?.[0]?.input, { file_path: "/path/to/file.txt" }, "fake JSON conversion input mismatch");
+
+    // read_only + normal text answer => accepted
+    const caseText = await runCase("read_file_text_only_accepted", {
+        model: "qwen-only-low-risk",
+        stream: false,
+        messages: [{ role: "user", content: "อ่านไฟล์" }]
+    }, {
+        status: 200,
+        calls: 1
+    }, () => {
+        return {
+            id: "msg_fake_qwen_text",
+            type: "message",
+            role: "assistant",
+            content: [
+                {
+                    type: "text",
+                    text: "Here is the summary of the file. No tools needed."
+                }
+            ],
+            model: "qwen-local",
+            stop_reason: "end_turn",
+            stop_sequence: null,
+            usage: { input_tokens: 10, output_tokens: 10 }
+        };
+    });
+    assert.equal(caseText.jsonBody?.content?.[0]?.type, "text");
+    assert.equal(caseText.jsonBody?.content?.[0]?.text, "Here is the summary of the file. No tools needed.");
+
+    // invalid tool call fake JSON => rejected
     await runCase("fake_tool_json_text_rejected", {
         model: "qwen-only-low-risk",
         stream: false,
@@ -248,7 +340,7 @@ async function main() {
             content: [
                 {
                     type: "text",
-                    text: 'Here is the tool call:\n```json\n{"name": "Read", "arguments": {"file_path": "/path/to/file.txt"}}\n```'
+                    text: 'Here is the tool call:\n```json\n{"name": "InvalidToolName", "arguments": {"file_path": "/path/to/file.txt"}}\n```'
                 }
             ],
             model: "qwen-local",
