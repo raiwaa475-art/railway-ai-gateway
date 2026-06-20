@@ -5,6 +5,7 @@
     "scripts": {
         "dev": "tsx src/server.ts",
         "build": "tsc",
+        "smoke:qwen-only-low-risk": "tsx scripts/qwen-only-low-risk-smoke.ts",
         "start": "node dist/server.js"
     },
     "dependencies": {
@@ -21,3 +22,5 @@
         "typescript": "^5.5.3"
     }
 }
+
+
