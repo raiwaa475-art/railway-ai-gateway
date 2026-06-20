@@ -1,4 +1,4 @@
-﻿import assert from "node:assert/strict";
+import assert from "node:assert/strict";
 import { config } from "../src/config/env.js";
 import { providerRegistry } from "../src/routing/registry.js";
 import { classifyQwenOnlyIntent, handleQwenOnlyLowRiskRequest } from "../src/routing/qwen-only-low-risk.js";
@@ -39,6 +39,7 @@ class FakeQwenProvider {
     id = "qwen-local";
     calls = 0;
     lastBody: any = undefined;
+    responseHandler?: (body: any) => any = undefined;
 
     async resolveRuntimeConfig() {
         return {
@@ -52,19 +53,24 @@ class FakeQwenProvider {
     async handleRequest(body: any) {
         this.calls += 1;
         this.lastBody = body;
-        const responseBody = {
-            id: "msg_fake_qwen",
-            type: "message",
-            role: "assistant",
-            content: [{ type: "text", text: "ok" }],
-            model: body.model || "qwen-only-low-risk",
-            stop_reason: "end_turn",
-            stop_sequence: null,
-            usage: {
-                input_tokens: 12,
-                output_tokens: 3
-            }
-        };
+        let responseBody: any;
+        if (this.responseHandler) {
+            responseBody = this.responseHandler(body);
+        } else {
+            responseBody = {
+                id: "msg_fake_qwen",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "text", text: "ok" }],
+                model: body.model || "qwen-only-low-risk",
+                stop_reason: "end_turn",
+                stop_sequence: null,
+                usage: {
+                    input_tokens: 12,
+                    output_tokens: 3
+                }
+            };
+        }
 
         return new Response(JSON.stringify(responseBody), {
             status: 200,
@@ -87,8 +93,16 @@ function makeReq(body: any) {
     } as any;
 }
 
-async function runCase(name: string, body: any, expected: { status: number; calls: number; rejection?: string }) {
+async function runCase(
+    name: string,
+    body: any,
+    expected: { status: number; calls: number; rejection?: string },
+    responseHandler?: (body: any) => any
+) {
     const fakeProvider = new FakeQwenProvider();
+    if (responseHandler) {
+        fakeProvider.responseHandler = responseHandler;
+    }
     const originalGetProvider = providerRegistry.getProvider.bind(providerRegistry);
     providerRegistry.getProvider = ((providerId: string) => {
         if (providerId === "qwen-local") return fakeProvider as any;
@@ -130,6 +144,119 @@ async function main() {
         stream: false,
         messages: [{ role: "user", content: "ตอบแค่ ok" }]
     }, { status: 200, calls: 1 });
+
+    await runCase("read_file_html", {
+        model: "qwen-only-low-risk",
+        stream: false,
+        messages: [{ role: "user", content: "อ่านไฟล์ html" }]
+    }, { status: 200, calls: 1 });
+
+    await runCase("read_file_fake_write_json", {
+        model: "qwen-only-low-risk",
+        stream: false,
+        messages: [{ role: "user", content: "อ่านไฟล์" }]
+    }, {
+        status: 200,
+        calls: 1,
+        rejection: "Qwen-only could not produce a valid tool call. Use qwen-smart."
+    }, () => {
+        return {
+            id: "msg_fake_qwen_tool",
+            type: "message",
+            role: "assistant",
+            content: [
+                {
+                    type: "text",
+                    text: '{"name": "Write", "arguments": {"file_path": "/path/to/file.txt", "content": "..."}}'
+                }
+            ],
+            model: "qwen-local",
+            stop_reason: "end_turn",
+            stop_sequence: null,
+            usage: { input_tokens: 10, output_tokens: 10 }
+        };
+    });
+
+    await runCase("read_file_dangerous_tool", {
+        model: "qwen-only-low-risk",
+        stream: false,
+        messages: [{ role: "user", content: "อ่านไฟล์" }]
+    }, {
+        status: 200,
+        calls: 1,
+        rejection: "Qwen-only could not produce a valid tool call. Use qwen-smart."
+    }, () => {
+        return {
+            id: "msg_fake_qwen_tool",
+            type: "message",
+            role: "assistant",
+            content: [
+                {
+                    type: "tool_use",
+                    id: "toolu_123",
+                    name: "Write",
+                    input: { file_path: "/path/to/file.txt", content: "..." }
+                }
+            ],
+            model: "qwen-local",
+            stop_reason: "tool_use",
+            stop_sequence: null,
+            usage: { input_tokens: 10, output_tokens: 10 }
+        };
+    });
+
+    await runCase("read_file_safe_tool", {
+        model: "qwen-only-low-risk",
+        stream: false,
+        messages: [{ role: "user", content: "อ่านไฟล์" }]
+    }, {
+        status: 200,
+        calls: 1
+    }, () => {
+        return {
+            id: "msg_fake_qwen_tool",
+            type: "message",
+            role: "assistant",
+            content: [
+                {
+                    type: "tool_use",
+                    id: "toolu_123",
+                    name: "Read",
+                    input: { file_path: "/path/to/file.txt" }
+                }
+            ],
+            model: "qwen-local",
+            stop_reason: "tool_use",
+            stop_sequence: null,
+            usage: { input_tokens: 10, output_tokens: 10 }
+        };
+    });
+
+    await runCase("fake_tool_json_text_rejected", {
+        model: "qwen-only-low-risk",
+        stream: false,
+        messages: [{ role: "user", content: "อ่านไฟล์" }]
+    }, {
+        status: 200,
+        calls: 1,
+        rejection: "Qwen-only could not produce a valid tool call. Use qwen-smart."
+    }, () => {
+        return {
+            id: "msg_fake_qwen_tool",
+            type: "message",
+            role: "assistant",
+            content: [
+                {
+                    type: "text",
+                    text: 'Here is the tool call:\n```json\n{"name": "Read", "arguments": {"file_path": "/path/to/file.txt"}}\n```'
+                }
+            ],
+            model: "qwen-local",
+            stop_reason: "end_turn",
+            stop_sequence: null,
+            usage: { input_tokens: 10, output_tokens: 10 }
+        };
+    });
 
     await runCase("code_edit_no_context", {
         model: "qwen-only-low-risk",

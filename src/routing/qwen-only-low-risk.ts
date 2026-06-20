@@ -1,11 +1,11 @@
-﻿import { Request, Response } from "express";
+import { Request, Response } from "express";
 import crypto from "crypto";
 import { config } from "../config/env.js";
 import { providerRegistry } from "./registry.js";
 import { QwenLocalProvider } from "../providers/qwen-local.js";
 import { insertModelCall, updateGatewayRequest } from "../utils/db.js";
 
-export type QwenOnlyIntentType = "chat" | "planning" | "explanation" | "code_edit" | "high_risk_code";
+export type QwenOnlyIntentType = "chat" | "planning" | "explanation" | "read_only" | "code_edit" | "high_risk_code";
 export type QwenOnlyAction = "disabled" | "reject" | "call_qwen";
 
 export interface QwenOnlyIntentDecision {
@@ -66,6 +66,23 @@ export function getLatestRealUserInstruction(messages: any[]): string {
     }
 
     return "";
+}
+
+function isReadOnlyIntent(text: string): boolean {
+    const normalized = normalizeText(text);
+    const readOnlyKeywords = [
+        "อ่านไฟล์",
+        "read file",
+        "show file",
+        "cat file",
+        "list files",
+        "open file",
+        "summarize file",
+        "inspect file",
+        "ดูไฟล์",
+        "สรุปไฟล์"
+    ];
+    return readOnlyKeywords.some(keyword => normalized.includes(keyword));
 }
 
 function isPlanningIntent(text: string): boolean {
@@ -263,7 +280,9 @@ export function classifyQwenOnlyIntent(body: any): QwenOnlyIntentDecision {
     const lower = normalizeText(realUserIntent);
 
     let intentType: QwenOnlyIntentType = "chat";
-    if (isPlanningIntent(realUserIntent)) {
+    if (isReadOnlyIntent(realUserIntent)) {
+        intentType = "read_only";
+    } else if (isPlanningIntent(realUserIntent)) {
         intentType = "planning";
     } else if (isExplanationIntent(realUserIntent)) {
         intentType = "explanation";
@@ -365,6 +384,91 @@ async function recordModelCall(params: {
     });
 }
 
+function detectFakeToolJson(text: string): boolean {
+    const trimmed = (text || "").trim();
+    if (!trimmed) return false;
+
+    // Check if the entire text is a JSON code block
+    let cleaned = trimmed;
+    if (cleaned.startsWith("```")) {
+        const lines = cleaned.split("\n");
+        if (lines[0].startsWith("```")) {
+            lines.shift();
+        }
+        if (lines.length > 0 && lines[lines.length - 1].startsWith("```")) {
+            lines.pop();
+        }
+        cleaned = lines.join("\n").trim();
+    }
+
+    if (cleaned.startsWith("{") && cleaned.endsWith("}")) {
+        try {
+            const parsed = JSON.parse(cleaned);
+            if (parsed && typeof parsed === "object") {
+                const name = parsed.name || parsed.tool_use || parsed.tool || parsed.tool_name;
+                const args = parsed.arguments || parsed.input || parsed.args || parsed.parameters;
+                if (name && typeof name === "string" && args) {
+                    return true;
+                }
+            }
+        } catch {
+            // ignore JSON parsing failed, try regex
+        }
+    }
+
+    // Regex check: e.g. {"name": "Write", "arguments": {...}} or similar
+    const namePattern = /["']?name["']?\s*:\s*["'][a-zA-Z0-9_\-]+["']/i;
+    const argumentsPattern = /["']?arguments["']?\s*:/i;
+    
+    if (namePattern.test(cleaned) && argumentsPattern.test(cleaned)) {
+        return true;
+    }
+
+    return false;
+}
+
+function isDangerousTool(name: string, input: any): boolean {
+    const lowerName = String(name || "").toLowerCase();
+    
+    const isWrite = lowerName.includes("write");
+    const isEdit = lowerName.includes("edit") || lowerName.includes("replace_file_content");
+    if (isWrite || isEdit) {
+        return true;
+    }
+    
+    const isBash = lowerName.includes("bash") || lowerName.includes("run_command") || lowerName.includes("shell") || lowerName === "cmd";
+    if (isBash) {
+        const command = String(input?.command || input?.CommandLine || input?.cmd || "").toLowerCase();
+        if (command) {
+            const dangerousPatterns = [
+                /\b(rm|mv|cp|chmod|chown|ln|mkdir|rmdir|touch|dd|tar|zip|unzip|gzip|gunzip)\b/,
+                /\bgit\s+(commit|push|reset|revert|checkout|clean|branch\s+-d|branch\s+-D|merge|rebase|pull|add)\b/,
+                />{1,2}\s*\S+/,
+                /\b(npm|yarn|pnpm|pip|pip3|apt|apt-get|brew|yum|dnf|apk|gem|cargo)\s+(install|uninstall|update|upgrade|add|remove|prune)\b/,
+                /\b(nano|vim|vi|emacs|sed|awk|perl)\b/
+            ];
+            
+            if (dangerousPatterns.some(pattern => pattern.test(command))) {
+                return true;
+            }
+        }
+    }
+    
+    return false;
+}
+
+function hasDangerousToolCall(content: any[]): boolean {
+    if (!Array.isArray(content)) return false;
+    for (const block of content) {
+        if (block?.type === "tool_use") {
+            if (isDangerousTool(block.name, block.input)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 async function forwardToQwenLocal(
     req: Request,
     res: Response,
@@ -373,14 +477,31 @@ async function forwardToQwenLocal(
     decision: QwenOnlyIntentDecision
 ): Promise<void> {
     const provider = await resolveQwenProvider();
+    const finalBody = { ...req.body };
+
+    if (decision.intentType === "read_only") {
+        const readOnlyInstruction = "When you need to read files, use the available Read/List/Glob/Grep tools through tool_use. Do not print JSON tool calls as text. Do not use Write/Edit for read-only requests.";
+        if (finalBody.system) {
+            finalBody.system = `${finalBody.system}\n\n${readOnlyInstruction}`;
+        } else {
+            finalBody.system = readOnlyInstruction;
+        }
+    } else if (decision.intentType === "chat" || decision.intentType === "planning" || decision.intentType === "explanation") {
+        if (finalBody.tools) {
+            delete finalBody.tools;
+        }
+    }
+
     if (!provider) {
         await updateGatewayRequest(requestId, 503, Date.now() - startTime);
         logEntry({
             type: "response",
             requestId,
-            clientModel: req.body?.model || "qwen-only-low-risk",
+            clientModel: finalBody.model || "qwen-only-low-risk",
             qwenOnlyUsed: false,
             qwenOnlyRejectedReason: "Qwen local provider is not registered",
+            qwenToolCallValid: true,
+            qwenFakeToolJsonDetected: false,
             finalProvider: "none",
             deepseekFallbackUsed: false,
             confidence_risk_level: "high",
@@ -405,9 +526,9 @@ async function forwardToQwenLocal(
     };
 
     const qwenStartTime = Date.now();
-    const upstream = await provider.handleRequest(req.body, clientHeaders);
+    const upstream = await provider.handleRequest(finalBody, clientHeaders);
     const qwenLatencyMs = Date.now() - qwenStartTime;
-    const isStream = !!req.body?.stream;
+    const isStream = !!finalBody.stream;
 
     if (!upstream.ok) {
         const errorText = await upstream.text();
@@ -415,12 +536,14 @@ async function forwardToQwenLocal(
         logEntry({
             type: "response",
             requestId,
-            clientModel: req.body?.model || "qwen-only-low-risk",
+            clientModel: finalBody.model || "qwen-only-low-risk",
             realUserIntentPreview: decision.realUserIntentPreview,
             intentType: decision.intentType,
             qwenOnlyUsed: false,
             qwenOnlyRejectedReason: `Qwen local provider returned ${upstream.status}`,
-            finalProvider: "qwen-local",
+            qwenToolCallValid: true,
+            qwenFakeToolJsonDetected: false,
+            finalProvider: "none",
             deepseekFallbackUsed: false,
             confidence_risk_level: decision.confidenceRiskLevel,
             build_check_status: decision.buildCheckStatus,
@@ -498,11 +621,13 @@ async function forwardToQwenLocal(
         logEntry({
             type: "response",
             requestId,
-            clientModel: req.body?.model || "qwen-only-low-risk",
+            clientModel: finalBody.model || "qwen-only-low-risk",
             realUserIntentPreview: decision.realUserIntentPreview,
             intentType: decision.intentType,
             qwenOnlyUsed: true,
             qwenOnlyRejectedReason: "",
+            qwenToolCallValid: true,
+            qwenFakeToolJsonDetected: false,
             finalProvider: "qwen-local",
             deepseekFallbackUsed: false,
             confidence_risk_level: decision.confidenceRiskLevel,
@@ -522,6 +647,61 @@ async function forwardToQwenLocal(
 
     const usageInputTokens = responseBody?.usage?.input_tokens || responseBody?.usage?.prompt_tokens || 0;
     const usageOutputTokens = responseBody?.usage?.output_tokens || responseBody?.usage?.completion_tokens || 0;
+
+    let qwenToolCallValid = true;
+    let qwenFakeToolJsonDetected = false;
+    let qwenOnlyRejectedReason = "";
+    let qwenOnlyUsed = true;
+    let finalProvider = "qwen-local";
+
+    let validatedBody = responseBody;
+
+    if (responseBody && upstream.status === 200) {
+        const content = responseBody.content;
+        if (Array.isArray(content)) {
+            for (const block of content) {
+                if (block?.type === "text" && detectFakeToolJson(block.text)) {
+                    qwenToolCallValid = false;
+                    qwenFakeToolJsonDetected = true;
+                    qwenOnlyRejectedReason = "qwen_fake_tool_json_detected";
+                    qwenOnlyUsed = false;
+                    finalProvider = "none";
+                    break;
+                }
+            }
+
+            if (qwenToolCallValid && decision.intentType === "read_only") {
+                if (hasDangerousToolCall(content)) {
+                    qwenToolCallValid = false;
+                    qwenOnlyRejectedReason = "qwen_dangerous_tool_rejected";
+                    qwenOnlyUsed = false;
+                    finalProvider = "none";
+                }
+            }
+        }
+    }
+
+    if (!qwenToolCallValid) {
+        validatedBody = {
+            id: "msg_qwen_only_failed_tool_use_" + Math.random().toString(36).substring(7),
+            type: "message",
+            role: "assistant",
+            content: [
+                {
+                    type: "text",
+                    text: "Qwen-only could not produce a valid tool call. Use qwen-smart."
+                }
+            ],
+            model: "qwen-only-low-risk",
+            stop_reason: "end_turn",
+            stop_sequence: null,
+            usage: {
+                input_tokens: usageInputTokens,
+                output_tokens: usageOutputTokens
+            }
+        };
+    }
+
     await recordModelCall({
         requestId,
         provider: "qwen-local",
@@ -532,26 +712,28 @@ async function forwardToQwenLocal(
         intentType: decision.intentType,
         exactContextSource: decision.exactContextSource,
         targetFile: decision.targetFile,
-        qwenOnlyUsed: true
+        qwenOnlyUsed
     });
     await updateGatewayRequest(requestId, upstream.status, Date.now() - startTime);
     logEntry({
         type: "response",
         requestId,
-        clientModel: req.body?.model || "qwen-only-low-risk",
+        clientModel: finalBody.model || "qwen-only-low-risk",
         realUserIntentPreview: decision.realUserIntentPreview,
         intentType: decision.intentType,
-        qwenOnlyUsed: true,
-        qwenOnlyRejectedReason: "",
-        finalProvider: "qwen-local",
+        qwenOnlyUsed,
+        qwenOnlyRejectedReason,
+        qwenToolCallValid,
+        qwenFakeToolJsonDetected,
+        finalProvider,
         deepseekFallbackUsed: false,
         confidence_risk_level: decision.confidenceRiskLevel,
         build_check_status: decision.buildCheckStatus,
-        status: upstream.status
+        status: qwenToolCallValid ? upstream.status : 200
     });
 
     if (responseBody && upstream.status === 200) {
-        res.status(upstream.status).json(responseBody);
+        res.status(200).json(validatedBody);
         return;
     }
 
@@ -585,6 +767,8 @@ export async function handleQwenOnlyLowRiskRequest(req: Request, res: Response):
             intentType: decision.intentType,
             qwenOnlyUsed: false,
             qwenOnlyRejectedReason: "Qwen-only low-risk mode is disabled",
+            qwenToolCallValid: true,
+            qwenFakeToolJsonDetected: false,
             finalProvider: "none",
             deepseekFallbackUsed: false,
             confidence_risk_level: "high",
@@ -610,6 +794,8 @@ export async function handleQwenOnlyLowRiskRequest(req: Request, res: Response):
             intentType: decision.intentType,
             qwenOnlyUsed: false,
             qwenOnlyRejectedReason: QWEN_ONLY_REJECTION_MESSAGE,
+            qwenToolCallValid: true,
+            qwenFakeToolJsonDetected: false,
             finalProvider: "none",
             deepseekFallbackUsed: false,
             confidence_risk_level: decision.confidenceRiskLevel,
@@ -633,6 +819,8 @@ export async function handleQwenOnlyLowRiskRequest(req: Request, res: Response):
         intentType: decision.intentType,
         qwenOnlyUsed: true,
         qwenOnlyRejectedReason: "",
+        qwenToolCallValid: true,
+        qwenFakeToolJsonDetected: false,
         finalProvider: "qwen-local",
         deepseekFallbackUsed: false,
         confidence_risk_level: decision.confidenceRiskLevel,
