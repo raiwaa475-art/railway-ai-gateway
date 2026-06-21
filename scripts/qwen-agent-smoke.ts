@@ -703,7 +703,7 @@ async function main() {
     const resEnforceFailed = await runCase("enforce_failed_safe_message", {
         model: "qwen-agent",
         stream: false,
-        messages: [{ role: "user", content: "สร้างไฟล์ src/test.ts ใส่ export const x = 1" }],
+        messages: [{ role: "user", content: "แก้ไขไฟล์ src/test.ts" }],
         tools: [
             { name: "Write", description: "write file", input_schema: {} },
             { name: "Edit", description: "edit file", input_schema: {} }
@@ -803,6 +803,58 @@ async function main() {
     });
     assert.equal(resClaudeFollowUp.content[0].type, "text");
     assert.equal(resClaudeFollowUp.stop_reason, "end_turn");
+
+    // 20i. Write tool call synthesis when Qwen returns text only
+    let case20iCalls = 0;
+    const resClaudeSynth = await runCase("claude_code_write_synthesis", {
+        model: "qwen-agent",
+        stream: false,
+        messages: [{ role: "user", content: "สร้าง src/test.ts ใส่ export const x = 1" }],
+        tools: [
+            { name: "Write", description: "write file", input_schema: {} },
+            { name: "Read", description: "read file", input_schema: {} }
+        ]
+    }, {
+        status: 200,
+        calls: 2, // 1 first attempt + 1 retry
+        typeMatch: "tool_use"
+    }, (body) => {
+        case20iCalls++;
+        return {
+            content: [{ type: "text", text: "No tool, just text response round " + case20iCalls }],
+            stop_reason: "end_turn"
+        };
+    });
+    assert.equal(resClaudeSynth.content[0].type, "tool_use");
+    assert.equal(resClaudeSynth.content[0].name, "Write");
+    assert.equal(resClaudeSynth.content[0].input.file_path, "src/test.ts");
+    assert.equal(resClaudeSynth.content[0].input.content, "export const x = 1");
+    assert.equal(resClaudeSynth.stop_reason, "tool_use");
+
+    // 20j. Clarification request when content is missing for create file
+    let case20jCalls = 0;
+    const resClaudeClarify = await runCase("claude_code_clarification_on_missing_content", {
+        model: "qwen-agent",
+        stream: false,
+        messages: [{ role: "user", content: "สร้าง src/test.ts" }],
+        tools: [
+            { name: "Write", description: "write file", input_schema: {} },
+            { name: "Read", description: "read file", input_schema: {} }
+        ]
+    }, {
+        status: 200,
+        calls: 2, // 1 first attempt + 1 retry
+        typeMatch: "text"
+    }, (body) => {
+        case20jCalls++;
+        return {
+            content: [{ type: "text", text: "No tool, just text response round " + case20jCalls }],
+            stop_reason: "end_turn"
+        };
+    });
+    assert.equal(resClaudeClarify.content[0].type, "text");
+    assert.ok(resClaudeClarify.content[0].text.includes("src/test.ts"));
+    assert.equal(resClaudeClarify.stop_reason, "end_turn");
 
     // 21. Check traces export and summary
     const expRes = new FakeResponse();

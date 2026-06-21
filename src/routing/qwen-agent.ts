@@ -221,6 +221,79 @@ function isEditToolRequired(intentMode: string, promptText: string): boolean {
     return hasEditIntentKeywords(promptText);
 }
 
+interface CreateFileIntent {
+    detected: boolean;
+    filePath: string | null;
+    content: string | null;
+    synthesisFailedReason: string | null;
+}
+
+function parseCreateFileIntent(prompt: string): CreateFileIntent {
+    const text = prompt.trim();
+    
+    // Check if there is create file intent
+    const hasCreateVerb = /(สร้าง|เขียน|create|write|make|new\s+file|ไฟล์ใหม่)/i.test(text);
+    if (!hasCreateVerb) {
+        return { detected: false, filePath: null, content: null, synthesisFailedReason: "No create file verb detected" };
+    }
+
+    // Try to extract a file path. Let's match a sequence that looks like a filename/path.
+    // e.g. src/test.ts, path/to/file.ext, filename.ext.
+    const filePathRegex = /(?:["']?)([a-zA-Z0-9_\-\.\/\\]+\.[a-zA-Z0-9]{1,5})(?:["']?)/;
+    const pathMatch = text.match(filePathRegex);
+    if (!pathMatch) {
+        return { detected: false, filePath: null, content: null, synthesisFailedReason: "No valid file path detected" };
+    }
+    const filePath = pathMatch[1];
+
+    // Find the content
+    const indexAfterPath = text.indexOf(filePath) + filePath.length;
+    let remaining = text.substring(indexAfterPath).trim();
+    
+    // If there's quotes around the filepath, remove the closing quote from remaining
+    if (remaining.startsWith('"') || remaining.startsWith("'")) {
+        remaining = remaining.substring(1).trim();
+    }
+
+    // Check if remaining has some separator prefix
+    // Separators: "ใส่", "เขียนว่า", "ด้วย", "ที่มี", "with", "containing", "content", "code", ":"
+    const separatorRegex = /^(?:ใส่|เขียนว่า|ด้วย|ที่มี|with|containing|content|code|:)\s*/i;
+    let content = "";
+    if (separatorRegex.test(remaining)) {
+        content = remaining.replace(separatorRegex, "").trim();
+    } else {
+        content = remaining.trim();
+    }
+
+    // Strip markdown code block fences if they wrap the content
+    if (content.startsWith("```")) {
+        const lines = content.split("\n");
+        if (lines[0].startsWith("```")) {
+            lines.shift();
+        }
+        if (lines.length > 0 && lines[lines.length - 1].trim() === "```") {
+            lines.pop();
+        }
+        content = lines.join("\n").trim();
+    }
+
+    if (!content) {
+        return {
+            detected: true,
+            filePath,
+            content: null,
+            synthesisFailedReason: "Content is missing or empty"
+        };
+    }
+
+    return {
+        detected: true,
+        filePath,
+        content,
+        synthesisFailedReason: null
+    };
+}
+
 // Extract fake JSON tool use from text response block
 function parseFakeToolJson(text: string): FakeToolCall | null {
     if (!text || typeof text !== "string") return null;
@@ -1241,7 +1314,10 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
         editToolRequired: isEditEnforceActive,
         editToolMissing: false,
         editToolEnforcementRetryUsed: false,
-        editToolEnforcementFailed: false
+        editToolEnforcementFailed: false,
+        editTextOnlyBlocked: false,
+        editToolSynthesized: false,
+        editToolSynthesisFailedReason: null
     };
 
     // Populate build status / result preview from historical last action
@@ -1554,13 +1630,17 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
     const firstToolBlocks = (processedResponse.content || []).filter((b: any) => b?.type === "tool_use");
     const firstHasEditTool = firstToolBlocks.some((b: any) => ["Write", "Edit", "MultiEdit"].includes(b.name));
     const firstEditToolMissing = isEditEnforceActive && !firstHasEditTool;
+    const firstIsTextOnlyEdit = intentMode === "edit_allowed" && toolRoundCount === 0 && firstToolBlocks.length === 0;
 
-    // 4. Compact retry once if validation fails OR if edit enforcement is active and missing edit tool
-    if ((!validation.valid && validation.errorReason) || firstEditToolMissing) {
+    // 4. Compact retry once if validation fails OR if edit enforcement is active and missing edit tool OR if edit_allowed returned text-only
+    if ((!validation.valid && validation.errorReason) || firstEditToolMissing || firstIsTextOnlyEdit) {
         hasRetryHappened = true;
 
         let retryUserContent = "";
-        if (firstEditToolMissing) {
+        if (firstIsTextOnlyEdit) {
+            traceData.editTextOnlyBlocked = true;
+            retryUserContent = "You must return a real tool_use block, not text.";
+        } else if (firstEditToolMissing) {
             traceData.editToolEnforcementRetryUsed = true;
             retryUserContent = "This is an edit task. You must use Write, Edit, or MultiEdit. Do not answer with text only.";
         } else {
@@ -1619,20 +1699,62 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
     const finalToolBlocks = (processedResponse.content || []).filter((b: any) => b?.type === "tool_use");
     const finalHasEditTool = finalToolBlocks.some((b: any) => ["Write", "Edit", "MultiEdit"].includes(b.name));
     const finalEditToolMissing = isEditEnforceActive && !finalHasEditTool;
+    const finalIsTextOnlyEdit = intentMode === "edit_allowed" && toolRoundCount === 0 && finalToolBlocks.length === 0;
 
-    if (finalEditToolMissing) {
-        traceData.editToolMissing = true;
-        traceData.editToolEnforcementFailed = true;
+    const shouldTrySynthesis = finalEditToolMissing || finalIsTextOnlyEdit;
 
-        // Return a safe final message
-        processedResponse.content = [{
-            type: "text",
-            text: "Edit intent was detected, but no edit tool was produced. Please specify the exact file path and requested change."
-        }];
-        processedResponse.stop_reason = "end_turn";
+    if (shouldTrySynthesis) {
+        const synthesisResult = parseCreateFileIntent(promptText);
+        if (synthesisResult.detected) {
+            if (synthesisResult.filePath && synthesisResult.content) {
+                // Synthesize Write tool_use
+                processedResponse.content = [
+                    {
+                        type: "tool_use",
+                        id: "toolu_synth_" + Math.random().toString(36).substring(7),
+                        name: "Write",
+                        input: {
+                            file_path: synthesisResult.filePath,
+                            content: synthesisResult.content
+                        }
+                    }
+                ];
+                processedResponse.stop_reason = "tool_use";
+                
+                traceData.editToolSynthesized = true;
+                traceData.editToolSynthesisFailedReason = null;
+                
+                validation = { valid: true, errorReason: null };
+            } else {
+                // Content is missing, ask clarification instead of Create/Write
+                traceData.editToolSynthesized = false;
+                traceData.editToolSynthesisFailedReason = synthesisResult.synthesisFailedReason || "Content is missing or empty";
+                
+                processedResponse.content = [
+                    {
+                        type: "text",
+                        text: `Please provide the content you would like to write to the file ${synthesisResult.filePath || "the specified file"}.`
+                    }
+                ];
+                processedResponse.stop_reason = "end_turn";
+                
+                validation = { valid: true, errorReason: null };
+            }
+        } else {
+            // Synthesis not detected, fall back to standard failure response
+            traceData.editToolMissing = true;
+            traceData.editToolEnforcementFailed = true;
+            traceData.editToolSynthesized = false;
+            traceData.editToolSynthesisFailedReason = synthesisResult.synthesisFailedReason || "No create file intent detected";
 
-        // Treat validation as failed so success is false
-        validation = { valid: false, errorReason: "Edit tool enforcement failed" };
+            processedResponse.content = [{
+                type: "text",
+                text: "Edit intent was detected, but no edit tool was produced. Please specify the exact file path and requested change."
+            }];
+            processedResponse.stop_reason = "end_turn";
+
+            validation = { valid: false, errorReason: "Edit tool enforcement failed" };
+        }
     }
 
     // Check duplicate, early stop, or intent gate if response has valid tool calls
