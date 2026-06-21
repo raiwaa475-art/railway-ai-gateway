@@ -330,7 +330,7 @@ async function main() {
         },
         {
             role: "user",
-            content: [{ type: "tool_result", tool_use_id: "t_dup_1", content: "success", is_error: false }]
+            content: [{ type: "tool_result", tool_use_id: "t_dup_1", content: "successfully", is_error: false }]
         }
     ];
 
@@ -363,7 +363,7 @@ async function main() {
         },
         {
             role: "user",
-            content: [{ type: "tool_result", tool_use_id: "t_hint_1", content: "success", is_error: false }]
+            content: [{ type: "tool_result", tool_use_id: "t_hint_1", content: "successfully", is_error: false }]
         }
     ];
 
@@ -395,7 +395,7 @@ async function main() {
         },
         {
             role: "user",
-            content: [{ type: "tool_result", tool_use_id: "t_early_1", content: "success", is_error: false }]
+            content: [{ type: "tool_result", tool_use_id: "t_early_1", content: "successfully", is_error: false }]
         }
     ];
 
@@ -855,6 +855,90 @@ async function main() {
     assert.equal(resClaudeClarify.content[0].type, "text");
     assert.ok(resClaudeClarify.content[0].text.includes("src/test.ts"));
     assert.equal(resClaudeClarify.stop_reason, "end_turn");
+
+    // 20k. Empty content request blocking - user request has file path but no content
+    // Model returns a Write tool call (e.g. with empty or placeholder content), but we must block it and ask clarification instead.
+    const resEmptyContentBlock = await runCase("empty_content_blocking", {
+        model: "qwen-agent",
+        stream: false,
+        messages: [{ role: "user", content: "สร้าง src/test.ts" }],
+        tools: [
+            { name: "Write", description: "write file", input_schema: {} },
+            { name: "Read", description: "read file", input_schema: {} }
+        ]
+    }, {
+        status: 200,
+        calls: 1, // first attempt returning Write will be blocked and replaced directly without retry
+        typeMatch: "text"
+    }, (body) => {
+        return {
+            content: [{
+                type: "tool_use",
+                id: "toolu_empty_write",
+                name: "Write",
+                input: {
+                    file_path: "src/test.ts",
+                    content: ""
+                }
+            }],
+            stop_reason: "tool_use"
+        };
+    });
+    assert.equal(resEmptyContentBlock.content[0].type, "text");
+    assert.ok(resEmptyContentBlock.content[0].text.includes("src/test.ts"));
+    assert.equal(resEmptyContentBlock.stop_reason, "end_turn");
+
+    // 20l. Tool result error handling and false success block
+    const resToolResultError = await runCase("tool_result_error_false_success", {
+        model: "qwen-agent",
+        stream: false,
+        messages: [
+            { role: "user", content: "สร้าง src/test.ts ใส่ export const x = 1" },
+            {
+                role: "assistant",
+                content: [
+                    {
+                        type: "tool_use",
+                        id: "toolu_failed_write",
+                        name: "Write",
+                        input: {
+                            file_path: "src/test.ts",
+                            content: "export const x = 1"
+                        }
+                    }
+                ]
+            },
+            {
+                role: "user",
+                content: [
+                    {
+                        type: "tool_result",
+                        tool_use_id: "toolu_failed_write",
+                        content: "error editing file"
+                    }
+                ]
+            }
+        ],
+        tools: [
+            { name: "Write", description: "write file", input_schema: {} },
+            { name: "Read", description: "read file", input_schema: {} }
+        ]
+    }, {
+        status: 200,
+        calls: 1,
+        typeMatch: "text"
+    }, (body) => {
+        return {
+            content: [{
+                type: "text",
+                text: "The file changes have been successfully applied."
+            }],
+            stop_reason: "end_turn"
+        };
+    });
+    assert.equal(resToolResultError.content[0].type, "text");
+    assert.ok(resToolResultError.content[0].text.includes("could not be applied") || resToolResultError.content[0].text.includes("error or empty content"));
+    assert.equal(resToolResultError.stop_reason, "end_turn");
 
     // 21. Check traces export and summary
     const expRes = new FakeResponse();

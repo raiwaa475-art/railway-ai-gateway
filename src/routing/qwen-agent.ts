@@ -1247,6 +1247,32 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
     injectPostSuccessStopHint(messages);
     const toolRoundCount = getToolRoundCount(messages);
 
+    let toolResultIndicatesFailure = false;
+    let toolResultIndicatesSuccess = false;
+
+    if (Array.isArray(messages)) {
+        for (const msg of messages) {
+            if (msg.role === "user" && Array.isArray(msg.content)) {
+                for (const b of msg.content) {
+                    if (b?.type === "tool_result") {
+                        const contentStr = typeof b.content === "string" ? b.content : JSON.stringify(b.content || "");
+                        const lowerContent = contentStr.toLowerCase();
+                        
+                        const hasErrKeyword = ["current file is empty", "provide code", "error editing file", "empty", "no content"].some(kw => lowerContent.includes(kw)) || b.is_error === true;
+                        const hasSuccKeyword = ["wrote", "successfully", "applied", "updated"].some(kw => lowerContent.includes(kw));
+                        
+                        if (hasErrKeyword) {
+                            toolResultIndicatesFailure = true;
+                        }
+                        if (hasSuccKeyword && !hasErrKeyword) {
+                            toolResultIndicatesSuccess = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     const promptText = getUserPromptText(messages);
     const intentMode = classifyIntent(promptText);
     let allowedTools: string[] = [];
@@ -1262,7 +1288,10 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
     const filteredTools = originalTools.filter((t: any) => allowedTools.includes(normalizeToolName(t.name)));
 
     const hasTools = filteredTools.length > 0;
-    const isStream = hasTools ? false : !!req.body.stream;
+    let isStream = hasTools ? false : !!req.body.stream;
+    if (toolResultIndicatesFailure) {
+        isStream = false;
+    }
 
     const rawRepoKey = (req.headers?.["x-repo-key"] as string) || 
                        (req.headers?.["x-repo-path"] as string) || 
@@ -1317,7 +1346,10 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
         editToolEnforcementFailed: false,
         editTextOnlyBlocked: false,
         editToolSynthesized: false,
-        editToolSynthesisFailedReason: null
+        editToolSynthesisFailedReason: null,
+        toolResultIndicatesFailure: toolResultIndicatesFailure,
+        toolResultIndicatesSuccess: toolResultIndicatesSuccess,
+        finalSuccessBlockedByToolError: false
     };
 
     // Populate build status / result preview from historical last action
@@ -1759,6 +1791,24 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
 
     // Check duplicate, early stop, or intent gate if response has valid tool calls
     if (validation.valid) {
+        const checkToolBlocks = (processedResponse.content || []).filter((b: any) => b?.type === "tool_use");
+        const hasEditTool = checkToolBlocks.some((b: any) => ["Write", "Edit", "MultiEdit"].includes(b.name));
+        if (hasEditTool) {
+            const synthesisResult = parseCreateFileIntent(promptText);
+            if (synthesisResult.detected && !synthesisResult.content) {
+                // Block the tool call and ask clarification!
+                processedResponse.content = [
+                    {
+                        type: "text",
+                        text: `Please provide the content you would like to write to the file ${synthesisResult.filePath || "the specified file"}.`
+                    }
+                ];
+                processedResponse.stop_reason = "end_turn";
+                traceData.editToolSynthesized = false;
+                traceData.editToolSynthesisFailedReason = "Model produced tool call but user request has no content";
+            }
+        }
+
         const toolUseBlocks = (processedResponse.content || []).filter((b: any) => b?.type === "tool_use");
         if (toolUseBlocks.length > 0) {
             // 1. Check duplicate tool calls
@@ -1809,7 +1859,8 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
             }
 
             const isSingleFileTask = touchedFiles.size === 1;
-            if (isSingleFileTask && successfulWriteEditCount === 1 && !hasError) {
+            const clearlyIndicatesSuccess = toolResultIndicatesSuccess && !toolResultIndicatesFailure;
+            if (isSingleFileTask && successfulWriteEditCount === 1 && clearlyIndicatesSuccess && !hasError) {
                 isEarlyStop = true;
             }
 
@@ -1859,6 +1910,21 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
                 processedResponse.content = [{ type: "text", text: combinedText }];
                 processedResponse.stop_reason = "end_turn";
             }
+        }
+    }
+
+    // Rewrite final text response if tool result indicates failure and the response is text-only
+    if (validation.valid && toolResultIndicatesFailure) {
+        const finalToolUseBlocks = (processedResponse.content || []).filter((b: any) => b?.type === "tool_use");
+        if (finalToolUseBlocks.length === 0) {
+            traceData.finalSuccessBlockedByToolError = true;
+            processedResponse.content = [
+                {
+                    type: "text",
+                    text: "The file changes could not be applied because the tool returned an error or empty content. Please provide the content/change needed."
+                }
+            ];
+            processedResponse.stop_reason = "end_turn";
         }
     }
 
@@ -1981,7 +2047,12 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
     }
 
     // Success response path
-    traceData.success = true;
+    if (toolResultIndicatesFailure) {
+        traceData.success = false;
+        traceData.failureReason = "Tool result indicates failure";
+    } else {
+        traceData.success = true;
+    }
     traceData.editedFiles = extractEditedFiles(processedResponse.content);
     
     const finalBlocks = processedResponse.content || [];
