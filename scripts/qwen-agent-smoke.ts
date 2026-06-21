@@ -718,6 +718,92 @@ async function main() {
         return { content: [{ type: "text", text: "Here is text only." }] };
     });
 
+    // 20g. Claude Code tool_use compatibility - สร้างไฟล์
+    const resClaudeWrite = await runCase("claude_code_write_compatibility", {
+        model: "qwen-agent",
+        stream: false,
+        messages: [{ role: "user", content: "สร้างไฟล์ src/qwen-test.ts ใส่ export const qwenTest = true" }],
+        tools: [
+            { name: "Write", description: "write file", input_schema: {} },
+            { name: "Read", description: "read file", input_schema: {} }
+        ]
+    }, {
+        status: 200,
+        calls: 1,
+        typeMatch: "tool_use"
+    }, (body) => {
+        // Return a mock Write tool call
+        return {
+            content: [{
+                type: "tool_use",
+                id: "toolu_test_write",
+                name: "Write",
+                input: {
+                    file_path: "src/qwen-test.ts",
+                    content: "export const qwenTest = true;\n"
+                }
+            }],
+            stop_reason: "tool_use"
+        };
+    });
+    assert.equal(resClaudeWrite.content[0].type, "tool_use");
+    assert.equal(resClaudeWrite.content[0].name, "Write");
+    assert.equal(resClaudeWrite.content[0].input.file_path, "src/qwen-test.ts");
+    assert.ok(resClaudeWrite.content[0].input.content.includes("qwenTest"));
+    assert.equal(resClaudeWrite.stop_reason, "tool_use");
+
+    // 20h. Claude Code tool_result follow-up
+    const resClaudeFollowUp = await runCase("claude_code_tool_result_followup", {
+        model: "qwen-agent",
+        stream: false,
+        messages: [
+            { role: "user", content: "สร้างไฟล์ src/qwen-test.ts ใส่ export const qwenTest = true" },
+            {
+                role: "assistant",
+                content: [
+                    {
+                        type: "tool_use",
+                        id: "toolu_test_write",
+                        name: "Write",
+                        input: {
+                            file_path: "src/qwen-test.ts",
+                            content: "export const qwenTest = true;\n"
+                        }
+                    }
+                ]
+            },
+            {
+                role: "user",
+                content: [
+                    {
+                        type: "tool_result",
+                        tool_use_id: "toolu_test_write",
+                        content: "File written successfully"
+                    }
+                ]
+            }
+        ],
+        tools: [
+            { name: "Write", description: "write file", input_schema: {} },
+            { name: "Read", description: "read file", input_schema: {} }
+        ]
+    }, {
+        status: 200,
+        calls: 1,
+        typeMatch: "text"
+    }, (body) => {
+        // Since tool result is returned, the mock Qwen should return a final text summary, not a tool_use block
+        return {
+            content: [{
+                type: "text",
+                text: "I have successfully created the file as requested."
+            }],
+            stop_reason: "end_turn"
+        };
+    });
+    assert.equal(resClaudeFollowUp.content[0].type, "text");
+    assert.equal(resClaudeFollowUp.stop_reason, "end_turn");
+
     // 21. Check traces export and summary
     const expRes = new FakeResponse();
     await exportQwenAgentTraces({ query: { format: "jsonl" } } as any, expRes as any);

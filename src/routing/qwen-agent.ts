@@ -642,6 +642,115 @@ function isToolCallDuplicate(currentName: string, currentInput: any, messages: a
     return false;
 }
 
+function ensureAnthropicShapeAndLog(processedResponse: any, requestId: string) {
+    if (!processedResponse || typeof processedResponse !== "object") return;
+
+    // Ensure type and role
+    processedResponse.type = processedResponse.type || "message";
+    processedResponse.role = processedResponse.role || "assistant";
+    processedResponse.model = "qwen-agent";
+
+    // Ensure id
+    if (!processedResponse.id || typeof processedResponse.id !== "string" || !processedResponse.id.startsWith("msg_")) {
+        processedResponse.id = "msg_qwen_" + crypto.randomUUID().replace(/-/g, "").substring(0, 12);
+    }
+
+    // Ensure content is array
+    if (!Array.isArray(processedResponse.content)) {
+        processedResponse.content = [];
+    }
+
+    // Process tool use blocks
+    const content = processedResponse.content;
+    for (const block of content) {
+        if (block && block.type === "tool_use") {
+            // Ensure unique ID starting with toolu_
+            if (typeof block.id !== "string" || !block.id.startsWith("toolu_")) {
+                const origId = block.id ? String(block.id) : "";
+                if (origId.startsWith("call_")) {
+                    block.id = "toolu_" + origId.substring(5);
+                } else if (origId) {
+                    block.id = "toolu_" + origId;
+                } else {
+                    block.id = "toolu_" + crypto.randomUUID().replace(/-/g, "").substring(0, 16);
+                }
+            }
+
+            // Ensure input is object, not JSON string
+            if (typeof block.input === "string") {
+                try {
+                    block.input = JSON.parse(block.input);
+                } catch {
+                    block.input = {};
+                }
+            } else if (!block.input || typeof block.input !== "object" || Array.isArray(block.input)) {
+                block.input = {};
+            }
+
+            // Normalize tool name to match Claude Code names exactly
+            block.name = normalizeToolName(block.name);
+        }
+    }
+
+    // Ensure stop_reason and stop_sequence
+    const hasTool = content.some((b: any) => b && b.type === "tool_use");
+    if (hasTool) {
+        processedResponse.stop_reason = "tool_use";
+    } else if (!processedResponse.stop_reason) {
+        processedResponse.stop_reason = "end_turn";
+    }
+    processedResponse.stop_sequence = processedResponse.stop_sequence !== undefined ? processedResponse.stop_sequence : null;
+
+    // Ensure usage
+    if (!processedResponse.usage || typeof processedResponse.usage !== "object") {
+        processedResponse.usage = { input_tokens: 0, output_tokens: 0 };
+    } else {
+        processedResponse.usage.input_tokens = processedResponse.usage.input_tokens ?? 0;
+        processedResponse.usage.output_tokens = processedResponse.usage.output_tokens ?? 0;
+    }
+
+    // Calculate debug fields
+    const blockTypes = content.map((b: any) => b?.type || "unknown");
+    const toolBlocks = content.filter((b: any) => b?.type === "tool_use");
+    
+    const anthropicResponseShapeValid = 
+        typeof processedResponse.id === "string" && processedResponse.id.startsWith("msg_") &&
+        processedResponse.type === "message" &&
+        processedResponse.role === "assistant" &&
+        processedResponse.model === "qwen-agent" &&
+        Array.isArray(processedResponse.content);
+
+    const stopReason = processedResponse.stop_reason;
+    const contentBlockTypes = blockTypes;
+    const toolUseIds = toolBlocks.map((b: any) => b.id);
+    const toolUseNames = toolBlocks.map((b: any) => b.name);
+    const toolInputIsObject = toolBlocks.every((b: any) => b.input && typeof b.input === "object" && !Array.isArray(b.input));
+
+    const validToolNames = ["Read", "Write", "Edit", "MultiEdit", "Grep", "Glob", "LS", "Bash"];
+    const claudeCodeCompatibleToolUse = 
+        anthropicResponseShapeValid &&
+        (toolBlocks.length === 0 || (
+            stopReason === "tool_use" &&
+            toolInputIsObject &&
+            toolBlocks.every((b: any) => 
+                typeof b.id === "string" && b.id.startsWith("toolu_") &&
+                validToolNames.includes(b.name)
+            )
+        ));
+
+    console.log(JSON.stringify({
+        debug: "qwen-agent-response-check",
+        requestId,
+        anthropicResponseShapeValid,
+        stopReason,
+        contentBlockTypes,
+        toolUseIds,
+        toolUseNames,
+        toolInputIsObject,
+        claudeCodeCompatibleToolUse
+    }));
+}
+
 function getUserPromptText(messages: any[]): string {
     if (!Array.isArray(messages)) return "";
     for (const msg of messages.slice().reverse()) {
@@ -1091,7 +1200,7 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
                        "";
     const repoKey = rawRepoKey ? normalizeRepoKey(rawRepoKey) : "";
 
-    const isEditEnforceActive = isEditToolRequired(intentMode, promptText);
+    const isEditEnforceActive = isEditToolRequired(intentMode, promptText) && toolRoundCount === 0;
 
     // Build initial trace values
     const traceData: any = {
@@ -1744,6 +1853,7 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
             blockedToolName: traceData.blockedToolName
         }));
 
+        ensureAnthropicShapeAndLog(failedResponse, requestId);
         res.json(failedResponse);
         return;
     }
@@ -1844,6 +1954,7 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
         blockedToolName: traceData.blockedToolName
     }));
 
+    ensureAnthropicShapeAndLog(processedResponse, requestId);
     res.json(processedResponse);
     return;
 }
