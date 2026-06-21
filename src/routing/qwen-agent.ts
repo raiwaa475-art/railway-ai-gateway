@@ -398,6 +398,113 @@ function extractBuildStatusAndResult(messages: any[]): { buildStatus: string; to
     return { buildStatus, toolResultPreview };
 }
 
+function findToolUseForId(messages: any[], toolUseId: string): any | null {
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const msg = messages[i];
+        if (msg.role === "assistant" && Array.isArray(msg.content)) {
+            const found = msg.content.find((b: any) => b?.type === "tool_use" && b.id === toolUseId);
+            if (found) return found;
+        }
+    }
+    return null;
+}
+
+function injectPostSuccessStopHint(messages: any[]) {
+    if (!Array.isArray(messages) || messages.length === 0) return;
+
+    // Find the last user message
+    const lastUserMsg = messages[messages.length - 1];
+    if (lastUserMsg && lastUserMsg.role === "user" && Array.isArray(lastUserMsg.content)) {
+        for (const block of lastUserMsg.content) {
+            if (block?.type === "tool_result" && block.is_error !== true) {
+                // Find matching tool use
+                const toolUseId = block.tool_use_id;
+                if (toolUseId) {
+                    const toolUse = findToolUseForId(messages, toolUseId);
+                    if (toolUse) {
+                        const normName = normalizeToolName(toolUse.name);
+                        if (normName === "Write" || normName === "Edit") {
+                            // Inject hint into this tool_result
+                            const hintText = "\nThe file operation succeeded. Do not call Write/Edit again unless there is a new error. Provide the final summary now.";
+                            
+                            // Check if hint is already appended to prevent double injection
+                            let alreadyHasHint = false;
+                            if (typeof block.content === "string") {
+                                if (block.content.includes("The file operation succeeded. Do not call Write/Edit again")) {
+                                    alreadyHasHint = true;
+                                }
+                            } else if (Array.isArray(block.content)) {
+                                const combinedText = block.content.map((b: any) => b?.text || "").join("");
+                                if (combinedText.includes("The file operation succeeded. Do not call Write/Edit again")) {
+                                    alreadyHasHint = true;
+                                }
+                            }
+
+                            if (!alreadyHasHint) {
+                                if (typeof block.content === "string") {
+                                    block.content += hintText;
+                                } else if (Array.isArray(block.content)) {
+                                    block.content.push({ type: "text", text: hintText });
+                                } else if (block.content === undefined || block.content === null) {
+                                    block.content = hintText;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+function isToolCallDuplicate(currentName: string, currentInput: any, messages: any[]): boolean {
+    const normCurrent = normalizeToolName(currentName);
+    const { repairedInput: currentRep } = repairToolArgs(normCurrent, currentInput || {});
+    
+    // We only perform duplicate detection on tool calls that have a file_path
+    const currentFilePath = typeof currentRep.file_path === 'string' ? currentRep.file_path.trim() : null;
+    if (!currentFilePath) {
+        return false;
+    }
+
+    const currentContent = typeof currentRep.content === 'string' ? currentRep.content : null;
+    const currentOld = typeof currentRep.old_string === 'string' ? currentRep.old_string : null;
+    const currentNew = typeof currentRep.new_string === 'string' ? currentRep.new_string : null;
+
+    for (const msg of messages) {
+        if (msg.role === "assistant" && Array.isArray(msg.content)) {
+            for (const block of msg.content) {
+                if (block?.type === "tool_use") {
+                    const normPrior = normalizeToolName(block.name);
+                    const { repairedInput: priorRep } = repairToolArgs(normPrior, block.input || {});
+                    const priorFilePath = typeof priorRep.file_path === 'string' ? priorRep.file_path.trim() : null;
+                    
+                    if (normCurrent === normPrior && currentFilePath === priorFilePath) {
+                        const priorContent = typeof priorRep.content === 'string' ? priorRep.content : null;
+                        const priorOld = typeof priorRep.old_string === 'string' ? priorRep.old_string : null;
+                        const priorNew = typeof priorRep.new_string === 'string' ? priorRep.new_string : null;
+
+                        if (normCurrent === "Write") {
+                            if (currentContent === priorContent) {
+                                return true;
+                            }
+                        } else if (normCurrent === "Edit") {
+                            if (currentOld === priorOld && currentNew === priorNew) {
+                                return true;
+                            }
+                        } else {
+                            if (currentContent === priorContent && currentOld === priorOld && currentNew === priorNew) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
 // Redact credential secrets from logging
 function sanitizeText(text: string): string {
     if (!text || typeof text !== "string") return text;
@@ -538,8 +645,8 @@ async function saveQwenAgentTrace(traceData: any) {
             try {
                 await pool.query(
                     `INSERT INTO qwen_agent_traces 
-                    (request_id, timestamp, mode, user_intent, sanitized_messages, available_tool_names, qwen_raw_output, fake_tool_json_detected, fake_tool_json_converted, requested_tool_name, normalized_tool_name, original_tool_args, repaired_tool_args, tool_args_repaired, tool_validation_error, tool_retry_used, tool_round_count, tool_result_preview, final_answer_preview, edited_files, build_status, success, failure_reason, human_verdict, prompt_profile_name, prompt_profile_version, controller_plan, controller_review, qwen_worker_trace_ids, final_result, accepted, repo_key) 
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)
+                    (request_id, timestamp, mode, user_intent, sanitized_messages, available_tool_names, qwen_raw_output, fake_tool_json_detected, fake_tool_json_converted, requested_tool_name, normalized_tool_name, original_tool_args, repaired_tool_args, tool_args_repaired, tool_validation_error, tool_retry_used, tool_round_count, tool_result_preview, final_answer_preview, edited_files, build_status, success, failure_reason, human_verdict, prompt_profile_name, prompt_profile_version, controller_plan, controller_review, qwen_worker_trace_ids, final_result, accepted, repo_key, duplicate_tool_call_blocked, forced_final_after_successful_edit, max_tool_rounds_reached) 
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)
                     ON CONFLICT (request_id) DO UPDATE SET
                     timestamp = EXCLUDED.timestamp,
                     mode = EXCLUDED.mode,
@@ -571,7 +678,10 @@ async function saveQwenAgentTrace(traceData: any) {
                     qwen_worker_trace_ids = EXCLUDED.qwen_worker_trace_ids,
                     final_result = EXCLUDED.final_result,
                     accepted = EXCLUDED.accepted,
-                    repo_key = EXCLUDED.repo_key`,
+                    repo_key = EXCLUDED.repo_key,
+                    duplicate_tool_call_blocked = EXCLUDED.duplicate_tool_call_blocked,
+                    forced_final_after_successful_edit = EXCLUDED.forced_final_after_successful_edit,
+                    max_tool_rounds_reached = EXCLUDED.max_tool_rounds_reached`,
                     [
                         sanitized.requestId,
                         new Date(sanitized.timestamp || Date.now()),
@@ -604,7 +714,10 @@ async function saveQwenAgentTrace(traceData: any) {
                         sanitized.qwenWorkerTraceIds || null,
                         sanitized.finalResult || null,
                         sanitized.accepted !== undefined ? sanitized.accepted : null,
-                        sanitized.repo_key || sanitized.repoKey || null
+                        sanitized.repo_key || sanitized.repoKey || null,
+                        sanitized.duplicateToolCallBlocked !== undefined ? sanitized.duplicateToolCallBlocked : null,
+                        sanitized.forcedFinalAfterSuccessfulEdit !== undefined ? sanitized.forcedFinalAfterSuccessfulEdit : null,
+                        sanitized.maxToolRoundsReached !== undefined ? sanitized.maxToolRoundsReached : null
                     ]
                 );
 
@@ -687,7 +800,10 @@ async function readAllTraces(): Promise<any[]> {
                 controllerReview: row.controller_review,
                 qwenWorkerTraceIds: row.qwen_worker_trace_ids,
                 finalResult: row.final_result,
-                accepted: row.accepted
+                accepted: row.accepted,
+                duplicateToolCallBlocked: row.duplicate_tool_call_blocked,
+                forcedFinalAfterSuccessfulEdit: row.forced_final_after_successful_edit,
+                maxToolRoundsReached: row.max_tool_rounds_reached
             }));
         } catch (dbErr) {
             console.error("Failed to read traces from DB, reading from JSONL file instead:", dbErr);
@@ -718,17 +834,18 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
     };
 
     const messages = req.body.messages || [];
+    injectPostSuccessStopHint(messages);
     const toolRoundCount = getToolRoundCount(messages);
 
     const hasTools = Array.isArray(req.body.tools) && req.body.tools.length > 0;
     const isStream = hasTools ? false : !!req.body.stream;
 
-    const rawRepoKey = (req.headers["x-repo-key"] as string) || 
-                       (req.headers["x-repo-path"] as string) || 
+    const rawRepoKey = (req.headers?.["x-repo-key"] as string) || 
+                       (req.headers?.["x-repo-path"] as string) || 
                        req.body.repo_key || 
                        req.body.repo_path || 
-                       (req.query.repoKey as string) || 
-                       (req.query.repo_key as string) || 
+                       (req.query?.repoKey as string) || 
+                       (req.query?.repo_key as string) || 
                        "";
     const repoKey = rawRepoKey ? normalizeRepoKey(rawRepoKey) : "";
 
@@ -759,7 +876,10 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
         failureReason: null,
         humanVerdict: "unknown",
         repoKey: repoKey,
-        repo_key: repoKey
+        repo_key: repoKey,
+        duplicateToolCallBlocked: false,
+        forcedFinalAfterSuccessfulEdit: false,
+        maxToolRoundsReached: false
     };
 
     // Populate build status / result preview from historical last action
@@ -784,6 +904,7 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
         traceData.success = false;
         traceData.failureReason = stopMsg;
         traceData.finalAnswerPreview = stopMsg;
+        traceData.maxToolRoundsReached = true;
 
         await saveQwenAgentTrace(traceData);
 
@@ -802,7 +923,10 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
             toolValidationError: "max_tool_rounds_exceeded",
             toolRetryUsed: false,
             toolRoundCount,
-            status: 200
+            status: 200,
+            duplicateToolCallBlocked: false,
+            forcedFinalAfterSuccessfulEdit: false,
+            maxToolRoundsReached: true
         }));
 
         res.json(payload);
@@ -1081,6 +1205,84 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
         }
     }
 
+    // Check duplicate or early stop if response has valid tool calls
+    if (validation.valid) {
+        const toolUseBlocks = (processedResponse.content || []).filter((b: any) => b?.type === "tool_use");
+        if (toolUseBlocks.length > 0) {
+            let isDuplicate = false;
+            for (const block of toolUseBlocks) {
+                if (isToolCallDuplicate(block.name, block.input, messages)) {
+                    isDuplicate = true;
+                    break;
+                }
+            }
+
+            // Check task early stop:
+            // For single-file Write/Edit tasks, if one successful Write/Edit happened and no error exists, stop after the next assistant text response.
+            let isEarlyStop = false;
+            let successfulWriteEditCount = 0;
+            const touchedFiles = new Set<string>();
+            let hasError = false;
+
+            for (const msg of messages) {
+                if (msg.role === "user" && Array.isArray(msg.content)) {
+                    for (const b of msg.content) {
+                        if (b?.type === "tool_result") {
+                            if (b.is_error === true) {
+                                hasError = true;
+                            } else {
+                                const toolUseId = b.tool_use_id;
+                                if (toolUseId) {
+                                    const toolUse = findToolUseForId(messages, toolUseId);
+                                    if (toolUse) {
+                                        const normName = normalizeToolName(toolUse.name);
+                                        if (normName === "Write" || normName === "Edit") {
+                                            successfulWriteEditCount++;
+                                            const { repairedInput } = repairToolArgs(normName, toolUse.input || {});
+                                            if (typeof repairedInput.file_path === 'string' && repairedInput.file_path.trim()) {
+                                                touchedFiles.add(repairedInput.file_path.trim());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (traceData.buildStatus === "failed") {
+                hasError = true;
+            }
+
+            const isSingleFileTask = touchedFiles.size === 1;
+            if (isSingleFileTask && successfulWriteEditCount === 1 && !hasError) {
+                isEarlyStop = true;
+            }
+
+            if (isDuplicate || isEarlyStop) {
+                let forcedText = "";
+                if (isDuplicate) {
+                    traceData.duplicateToolCallBlocked = true;
+                    forcedText = "The file changes have already been successfully applied. Provide the final summary now.";
+                } else if (isEarlyStop) {
+                    traceData.forcedFinalAfterSuccessfulEdit = true;
+                    forcedText = "The file changes have been successfully applied. Provide the final summary now.";
+                }
+
+                const originalTextBlocks = (processedResponse.content || [])
+                    .filter((b: any) => b?.type === "text")
+                    .map((b: any) => b.text || "")
+                    .join("\n");
+                
+                const combinedText = (originalTextBlocks.trim() ? originalTextBlocks + "\n\n" : "") + forcedText;
+                
+                processedResponse.content = [{ type: "text", text: combinedText }];
+                processedResponse.stop_reason = "end_turn";
+            }
+        }
+    }
+
     // 5. Final Output Handling
     if (!validation.valid) {
         // Validation failed twice
@@ -1118,7 +1320,10 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
             toolValidationError: traceData.toolValidationError,
             toolRetryUsed: hasRetryHappened,
             toolRoundCount,
-            status: 200
+            status: 200,
+            duplicateToolCallBlocked: traceData.duplicateToolCallBlocked,
+            forcedFinalAfterSuccessfulEdit: traceData.forcedFinalAfterSuccessfulEdit,
+            maxToolRoundsReached: traceData.maxToolRoundsReached
         }));
 
         res.json(failedResponse);
@@ -1151,10 +1356,14 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
         toolValidationError: null,
         toolRetryUsed: hasRetryHappened,
         toolRoundCount,
-        status: 200
+        status: 200,
+        duplicateToolCallBlocked: traceData.duplicateToolCallBlocked,
+        forcedFinalAfterSuccessfulEdit: traceData.forcedFinalAfterSuccessfulEdit,
+        maxToolRoundsReached: traceData.maxToolRoundsReached
     }));
 
     res.json(processedResponse);
+    return;
 }
 
 // Streams out formatted tuning dataset
@@ -1189,7 +1398,10 @@ export async function exportQwenAgentTraces(req: Request, res: Response) {
                     normalizedToolName: t.normalizedToolName,
                     editedFiles: t.editedFiles,
                     buildStatus: t.buildStatus,
-                    humanVerdict: t.humanVerdict || "unknown"
+                    humanVerdict: t.humanVerdict || "unknown",
+                    duplicateToolCallBlocked: t.duplicateToolCallBlocked,
+                    forcedFinalAfterSuccessfulEdit: t.forcedFinalAfterSuccessfulEdit,
+                    maxToolRoundsReached: t.maxToolRoundsReached
                 }
             };
         });

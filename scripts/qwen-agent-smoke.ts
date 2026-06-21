@@ -322,7 +322,105 @@ async function main() {
         textMatch: "Qwen-agent stopped: max tool rounds reached."
     });
 
-    // 10. Check traces export and summary
+    // 10. Duplicate tool-call detection
+    const messagesDup = [
+        {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "t_dup_1", name: "Write", input: { file_path: "test.txt", content: "hello" } }]
+        },
+        {
+            role: "user",
+            content: [{ type: "tool_result", tool_use_id: "t_dup_1", content: "success", is_error: false }]
+        }
+    ];
+
+    const resDup = await runCase("duplicate_detection", {
+        model: "qwen-agent",
+        stream: false,
+        messages: messagesDup
+    }, {
+        status: 200,
+        calls: 1,
+        typeMatch: "text",
+        textMatch: "The file changes have already been successfully applied."
+    }, () => {
+        return {
+            content: [{
+                type: "tool_use",
+                id: "t_dup_2",
+                name: "Write",
+                input: { file_path: "test.txt", content: "hello" }
+            }]
+        };
+    });
+    assert.equal(resDup.stop_reason, "end_turn");
+
+    // 11. Post-success stop hint
+    const messagesHint = [
+        {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "t_hint_1", name: "Write", input: { file_path: "test.txt", content: "hello" } }]
+        },
+        {
+            role: "user",
+            content: [{ type: "tool_result", tool_use_id: "t_hint_1", content: "success", is_error: false }]
+        }
+    ];
+
+    let lastProviderBody: any = null;
+    await runCase("post_success_stop_hint", {
+        model: "qwen-agent",
+        stream: false,
+        messages: messagesHint
+    }, {
+        status: 200,
+        calls: 1,
+        typeMatch: "text"
+    }, (body) => {
+        lastProviderBody = body;
+        return {
+            content: [{ type: "text", text: "ok" }]
+        };
+    });
+    
+    const lastUserMsg = lastProviderBody.messages[lastProviderBody.messages.length - 1];
+    const toolResultBlock = lastUserMsg.content.find((b: any) => b?.type === "tool_result");
+    assert.ok(toolResultBlock.content.includes("The file operation succeeded. Do not call Write/Edit again"), "Hint not injected!");
+
+    // 12. Simple task early stop
+    const messagesEarlyStop = [
+        {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "t_early_1", name: "Edit", input: { file_path: "app.ts", old_string: "a", new_string: "b" } }]
+        },
+        {
+            role: "user",
+            content: [{ type: "tool_result", tool_use_id: "t_early_1", content: "success", is_error: false }]
+        }
+    ];
+
+    const resEarly = await runCase("early_stop_after_successful_edit", {
+        model: "qwen-agent",
+        stream: false,
+        messages: messagesEarlyStop
+    }, {
+        status: 200,
+        calls: 1,
+        typeMatch: "text",
+        textMatch: "The file changes have been successfully applied."
+    }, () => {
+        return {
+            content: [{
+                type: "tool_use",
+                id: "t_early_2",
+                name: "Read",
+                input: { file_path: "app.ts" }
+            }]
+        };
+    });
+    assert.equal(resEarly.stop_reason, "end_turn");
+
+    // 13. Check traces export and summary
     const expRes = new FakeResponse();
     await exportQwenAgentTraces({ query: { format: "jsonl" } } as any, expRes as any);
     assert.equal(expRes.statusCode, 200);
