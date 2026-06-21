@@ -202,6 +202,10 @@ export async function initDb() {
         await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS duplicate_tool_call_blocked BOOLEAN;`);
         await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS forced_final_after_successful_edit BOOLEAN;`);
         await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS max_tool_rounds_reached BOOLEAN;`);
+        await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS intent_mode VARCHAR(50);`);
+        await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS allowed_tools TEXT[];`);
+        await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS blocked_by_intent_gate BOOLEAN;`);
+        await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS blocked_tool_name VARCHAR(255);`);
 
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS input_cost_usd NUMERIC(12, 6) DEFAULT 0;`);
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS input_cost_thb NUMERIC(12, 6) DEFAULT 0;`);

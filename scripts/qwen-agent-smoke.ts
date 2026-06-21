@@ -420,7 +420,156 @@ async function main() {
     });
     assert.equal(resEarly.stop_reason, "end_turn");
 
-    // 13. Check traces export and summary
+    // 14. "hi" uses 0 tools (chat_only)
+    let hiToolsOffered: any[] | undefined = undefined;
+    await runCase("chat_only_hi", {
+        model: "qwen-agent",
+        stream: false,
+        messages: [{ role: "user", content: "hi" }],
+        tools: [{ name: "Read", description: "read file", input_schema: {} }]
+    }, {
+        status: 200,
+        calls: 1,
+        typeMatch: "text"
+    }, (body) => {
+        hiToolsOffered = body.tools;
+        return { content: [{ type: "text", text: "hello" }] };
+    });
+    assert.ok(!hiToolsOffered || hiToolsOffered.length === 0, "Tools should not be offered in chat_only");
+
+    // 15. "ดี" uses 0 tools (chat_only)
+    let thToolsOffered: any[] | undefined = undefined;
+    await runCase("chat_only_thai", {
+        model: "qwen-agent",
+        stream: false,
+        messages: [{ role: "user", content: "ดี" }],
+        tools: [{ name: "Read", description: "read file", input_schema: {} }]
+    }, {
+        status: 200,
+        calls: 1,
+        typeMatch: "text"
+    }, (body) => {
+        thToolsOffered = body.tools;
+        return { content: [{ type: "text", text: "ดีครับ" }] };
+    });
+    assert.ok(!thToolsOffered || thToolsOffered.length === 0, "Tools should not be offered in chat_only");
+
+    // 16. "หา DATABASE_URL" allows Grep/Read, not Write
+    let findToolsOffered: any[] = [];
+    await runCase("read_only_find", {
+        model: "qwen-agent",
+        stream: false,
+        messages: [{ role: "user", content: "หา DATABASE_URL" }],
+        tools: [
+            { name: "Read", description: "read file", input_schema: {} },
+            { name: "Grep", description: "grep file", input_schema: {} },
+            { name: "Write", description: "write file", input_schema: {} }
+        ]
+    }, {
+        status: 200,
+        calls: 1
+    }, (body) => {
+        findToolsOffered = body.tools || [];
+        return { content: [{ type: "text", text: "found nothing" }] };
+    });
+    const findToolNames = findToolsOffered.map((t: any) => t.name);
+    assert.ok(findToolNames.includes("Read"), "Should offer Read");
+    assert.ok(findToolNames.includes("Grep"), "Should offer Grep");
+    assert.ok(!findToolNames.includes("Write"), "Should NOT offer Write");
+
+    // 17. "สร้าง src/test.ts" uses Write (edit_allowed)
+    let createToolsOffered: any[] = [];
+    await runCase("edit_allowed_create", {
+        model: "qwen-agent",
+        stream: false,
+        messages: [{ role: "user", content: "สร้าง src/test.ts" }],
+        tools: [
+            { name: "Read", description: "read file", input_schema: {} },
+            { name: "Write", description: "write file", input_schema: {} },
+            { name: "Bash", description: "bash", input_schema: {} }
+        ]
+    }, {
+        status: 200,
+        calls: 1
+    }, (body) => {
+        createToolsOffered = body.tools || [];
+        return { content: [{ type: "text", text: "done" }] };
+    });
+    const createToolNames = createToolsOffered.map((t: any) => t.name);
+    assert.ok(createToolNames.includes("Write"), "Should offer Write");
+    assert.ok(!createToolNames.includes("Bash"), "Should NOT offer Bash");
+
+    // 18. "แก้ src/test.ts" uses Edit/Write (edit_allowed)
+    let fixToolsOffered: any[] = [];
+    await runCase("edit_allowed_fix", {
+        model: "qwen-agent",
+        stream: false,
+        messages: [{ role: "user", content: "แก้ src/test.ts" }],
+        tools: [
+            { name: "Edit", description: "edit file", input_schema: {} },
+            { name: "Write", description: "write file", input_schema: {} },
+            { name: "Bash", description: "bash", input_schema: {} }
+        ]
+    }, {
+        status: 200,
+        calls: 1
+    }, (body) => {
+        fixToolsOffered = body.tools || [];
+        return { content: [{ type: "text", text: "done" }] };
+    });
+    const fixToolNames = fixToolsOffered.map((t: any) => t.name);
+    assert.ok(fixToolNames.includes("Edit"), "Should offer Edit");
+    assert.ok(fixToolNames.includes("Write"), "Should offer Write");
+    assert.ok(!fixToolNames.includes("Bash"), "Should NOT offer Bash");
+
+    // 19. "npm run build" uses Bash (bash_allowed)
+    let buildToolsOffered: any[] = [];
+    await runCase("bash_allowed_build", {
+        model: "qwen-agent",
+        stream: false,
+        messages: [{ role: "user", content: "npm run build" }],
+        tools: [
+            { name: "Write", description: "write file", input_schema: {} },
+            { name: "Bash", description: "bash", input_schema: {} }
+        ]
+    }, {
+        status: 200,
+        calls: 1
+    }, (body) => {
+        buildToolsOffered = body.tools || [];
+        return { content: [{ type: "text", text: "done" }] };
+    });
+    const buildToolNames = buildToolsOffered.map((t: any) => t.name);
+    assert.ok(buildToolNames.includes("Bash"), "Should offer Bash");
+    assert.ok(!buildToolNames.includes("Write"), "Should NOT offer Write");
+
+    // 20. Intent Gate Tool Blocking
+    const resBlocked = await runCase("intent_gate_blocking", {
+        model: "qwen-agent",
+        stream: false,
+        messages: [{ role: "user", content: "หา DATABASE_URL" }],
+        tools: [
+            { name: "Read", description: "read file", input_schema: {} },
+            { name: "Write", description: "write file", input_schema: {} }
+        ]
+    }, {
+        status: 200,
+        calls: 1,
+        typeMatch: "text",
+        textMatch: "Tool Write is blocked."
+    }, () => {
+        return {
+            content: [{
+                type: "tool_use",
+                id: "t_blocked_1",
+                name: "Write",
+                input: { file_path: "test.txt", content: "hello" }
+            }]
+        };
+    });
+    assert.equal(resBlocked.stop_reason, "end_turn");
+
+    // 21. Check traces export and summary
     const expRes = new FakeResponse();
     await exportQwenAgentTraces({ query: { format: "jsonl" } } as any, expRes as any);
     assert.equal(expRes.statusCode, 200);

@@ -5,7 +5,7 @@ import path from "path";
 import { config } from "../config/env.js";
 import { providerRegistry } from "./registry.js";
 import { QwenLocalProvider } from "../providers/qwen-local.js";
-import { pool } from "../utils/db.js";
+import { pool, insertModelCall } from "../utils/db.js";
 import { 
     getActivePromptProfile, 
     getEnabledAdapterRules, 
@@ -82,6 +82,108 @@ function normalizeToolName(name: string): string {
 interface FakeToolCall {
     name: string;
     input: any;
+}
+
+function getTargetFileFromRecentToolUse(messages: any[]): string {
+    for (const msg of (Array.isArray(messages) ? messages : []).slice(-10).reverse()) {
+        if (!Array.isArray(msg?.content)) continue;
+        for (const block of msg.content) {
+            if (block?.type !== "tool_use") continue;
+            const input = block.input || {};
+            const filePath = input.AbsolutePath || input.file_path || input.path || input.file || "";
+            if (typeof filePath === "string" && filePath.trim()) {
+                return filePath.trim();
+            }
+        }
+    }
+    return "";
+}
+
+function normalizePatchPath(filePath: string): string {
+    let p = String(filePath || "").trim();
+    p = p.replace(/\\/g, "/").replace(/\/+/g, "/");
+    p = p.replace(/^\.\//, "");
+    p = p.replace(/^[ab]\//, "");
+    return p.replace(/^\/+/, "").toLowerCase();
+}
+
+function isRangeOrSearchToolResult(toolName: string, input: any, text: string): boolean {
+    const lowerTool = String(toolName || "").toLowerCase();
+    if (/(grep|search|find|rg|select-string|head|tail|sed|range|snippet)/i.test(lowerTool)) {
+        return true;
+    }
+    if (
+        input?.offset !== undefined ||
+        input?.limit !== undefined ||
+        input?.start !== undefined ||
+        input?.end !== undefined ||
+        input?.start_line !== undefined ||
+        input?.end_line !== undefined ||
+        input?.line_start !== undefined ||
+        input?.line_end !== undefined ||
+        input?.pattern !== undefined ||
+        input?.query !== undefined
+    ) {
+        return true;
+    }
+    return String(text || "").toLowerCase().includes("matches") && /\d+[:|]/.test(text);
+}
+
+function hasTruncationMarker(text: string): boolean {
+    const lowered = String(text || "").toLowerCase();
+    return lowered.includes("truncated") ||
+        lowered.includes("omitted") ||
+        lowered.includes("output clipped") ||
+        lowered.includes("content clipped") ||
+        lowered.includes("remaining lines") ||
+        lowered.includes("more lines");
+}
+
+function isFullFileReadToolResult(toolName: string, input: any, text: string): boolean {
+    const lowerTool = String(toolName || "").toLowerCase();
+    const exactToolPattern = /(^|[_\-\s.])(read|view|get|open|cat|show)([_\-\s.]|$)/i;
+    if (!exactToolPattern.test(lowerTool) && !/file.*(content|text)/i.test(lowerTool)) {
+        return false;
+    }
+    if (hasTruncationMarker(text) || isRangeOrSearchToolResult(toolName, input, text)) {
+        return false;
+    }
+    return String(text || "").trim().length > 0;
+}
+
+function getFileContextSource(messages: any[]): "tool_result_exact" | "tool_result_partial" | "none" {
+    const targetFile = getTargetFileFromRecentToolUse(messages);
+    if (!targetFile) return "none";
+    const normalizedTarget = normalizePatchPath(targetFile);
+    const targetName = normalizedTarget.split("/").pop() || "";
+
+    for (const msg of (Array.isArray(messages) ? messages : []).slice().reverse()) {
+        if (!Array.isArray(msg?.content)) continue;
+
+        for (const block of msg.content) {
+            if (block?.type !== "tool_result" || block.content === undefined) continue;
+            const toolUseId = block.tool_use_id;
+            if (!toolUseId) continue;
+
+            const toolUseMsg = (Array.isArray(messages) ? messages : []).find(m =>
+                Array.isArray(m?.content) && m.content.some((b: any) => b?.type === "tool_use" && b.id === toolUseId)
+            );
+            const toolUseBlock = toolUseMsg?.content?.find((b: any) => b?.type === "tool_use" && b.id === toolUseId);
+            const toolName = toolUseBlock?.name || "";
+            const input = toolUseBlock?.input || {};
+            const inputPath = input.AbsolutePath || input.file_path || input.path || "";
+            const normalizedInputPath = typeof inputPath === "string" ? normalizePatchPath(inputPath) : "";
+            const pathMatches = normalizedInputPath === normalizedTarget || (targetName && normalizedInputPath.split("/").pop() === targetName);
+            if (!pathMatches) continue;
+
+            const rawText = typeof block.content === "string" ? block.content : JSON.stringify(block.content);
+            if (!rawText.trim()) continue;
+
+            const isExact = isFullFileReadToolResult(toolName, input, rawText);
+            return isExact ? "tool_result_exact" : "tool_result_partial";
+        }
+    }
+    return "none";
 }
 
 // Extract fake JSON tool use from text response block
@@ -505,6 +607,65 @@ function isToolCallDuplicate(currentName: string, currentInput: any, messages: a
     return false;
 }
 
+function getUserPromptText(messages: any[]): string {
+    if (!Array.isArray(messages)) return "";
+    for (const msg of messages.slice().reverse()) {
+        if (msg.role === "user") {
+            if (typeof msg.content === "string" && msg.content.trim()) {
+                return msg.content.trim();
+            }
+            if (Array.isArray(msg.content)) {
+                const text = msg.content
+                    .filter((b: any) => b?.type === "text")
+                    .map((b: any) => b.text || "")
+                    .join("\n")
+                    .trim();
+                if (text) return text;
+            }
+        }
+    }
+    return "";
+}
+
+function classifyIntent(prompt: string): "chat_only" | "read_only" | "edit_allowed" | "bash_allowed" {
+    const text = prompt.trim().toLowerCase();
+    if (!text) {
+        // Default to edit_allowed when there is no user text message (like in headless test cases)
+        // to prevent false blocking of tool execution
+        return "edit_allowed";
+    }
+
+    // 1. Bash Allowed keywords/patterns
+    // Match common shell binaries/commands at the start of the line, or common runner patterns
+    const startsWithBashCmd = /^(npm|git|node|npx|tsc|vitest|jest|cargo|python|pip|yarn|pnpm|docker|make|rm|mkdir|cp|mv|ls|cd|compile|build|test|run|execute|install)\b/;
+    const commandRunnerPattern = /\b(npm|npx|yarn|pnpm|cargo|go|make|run)\s+(build|test|run|execute|install|compile)\b/;
+    
+    if (startsWithBashCmd.test(text) || commandRunnerPattern.test(text)) {
+        return "bash_allowed";
+    }
+
+    // 2. Edit Allowed keywords/patterns
+    const editKeywords = [
+        "สร้าง", "แก้", "เขียน", "ลบ", "เปลี่ยน", "อัพเดต", "เพิ่ม",
+        "create", "write", "edit", "fix", "delete", "update", "modify", "add", "change", "replace", "insert", "patch", "remove", "make"
+    ];
+    if (editKeywords.some(kw => text.includes(kw))) {
+        return "edit_allowed";
+    }
+
+    // 3. Read Only keywords/patterns
+    const readKeywords = [
+        "หา", "ดู", "อ่าน", "ค้นหา", "รายการ", "ตรวจสอบ",
+        "find", "search", "grep", "read", "view", "show", "list", "check", "verify", "look", "inspect", "scan"
+    ];
+    if (readKeywords.some(kw => text.includes(kw))) {
+        return "read_only";
+    }
+
+    // 4. Default: chat_only
+    return "chat_only";
+}
+
 // Redact credential secrets from logging
 function sanitizeText(text: string): string {
     if (!text || typeof text !== "string") return text;
@@ -645,8 +806,8 @@ async function saveQwenAgentTrace(traceData: any) {
             try {
                 await pool.query(
                     `INSERT INTO qwen_agent_traces 
-                    (request_id, timestamp, mode, user_intent, sanitized_messages, available_tool_names, qwen_raw_output, fake_tool_json_detected, fake_tool_json_converted, requested_tool_name, normalized_tool_name, original_tool_args, repaired_tool_args, tool_args_repaired, tool_validation_error, tool_retry_used, tool_round_count, tool_result_preview, final_answer_preview, edited_files, build_status, success, failure_reason, human_verdict, prompt_profile_name, prompt_profile_version, controller_plan, controller_review, qwen_worker_trace_ids, final_result, accepted, repo_key, duplicate_tool_call_blocked, forced_final_after_successful_edit, max_tool_rounds_reached) 
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)
+                    (request_id, timestamp, mode, user_intent, sanitized_messages, available_tool_names, qwen_raw_output, fake_tool_json_detected, fake_tool_json_converted, requested_tool_name, normalized_tool_name, original_tool_args, repaired_tool_args, tool_args_repaired, tool_validation_error, tool_retry_used, tool_round_count, tool_result_preview, final_answer_preview, edited_files, build_status, success, failure_reason, human_verdict, prompt_profile_name, prompt_profile_version, controller_plan, controller_review, qwen_worker_trace_ids, final_result, accepted, repo_key, duplicate_tool_call_blocked, forced_final_after_successful_edit, max_tool_rounds_reached, intent_mode, allowed_tools, blocked_by_intent_gate, blocked_tool_name) 
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39)
                     ON CONFLICT (request_id) DO UPDATE SET
                     timestamp = EXCLUDED.timestamp,
                     mode = EXCLUDED.mode,
@@ -681,7 +842,11 @@ async function saveQwenAgentTrace(traceData: any) {
                     repo_key = EXCLUDED.repo_key,
                     duplicate_tool_call_blocked = EXCLUDED.duplicate_tool_call_blocked,
                     forced_final_after_successful_edit = EXCLUDED.forced_final_after_successful_edit,
-                    max_tool_rounds_reached = EXCLUDED.max_tool_rounds_reached`,
+                    max_tool_rounds_reached = EXCLUDED.max_tool_rounds_reached,
+                    intent_mode = EXCLUDED.intent_mode,
+                    allowed_tools = EXCLUDED.allowed_tools,
+                    blocked_by_intent_gate = EXCLUDED.blocked_by_intent_gate,
+                    blocked_tool_name = EXCLUDED.blocked_tool_name`,
                     [
                         sanitized.requestId,
                         new Date(sanitized.timestamp || Date.now()),
@@ -717,7 +882,11 @@ async function saveQwenAgentTrace(traceData: any) {
                         sanitized.repo_key || sanitized.repoKey || null,
                         sanitized.duplicateToolCallBlocked !== undefined ? sanitized.duplicateToolCallBlocked : null,
                         sanitized.forcedFinalAfterSuccessfulEdit !== undefined ? sanitized.forcedFinalAfterSuccessfulEdit : null,
-                        sanitized.maxToolRoundsReached !== undefined ? sanitized.maxToolRoundsReached : null
+                        sanitized.maxToolRoundsReached !== undefined ? sanitized.maxToolRoundsReached : null,
+                        sanitized.intentMode || null,
+                        sanitized.allowedTools || null,
+                        sanitized.blockedByIntentGate !== undefined ? sanitized.blockedByIntentGate : null,
+                        sanitized.blockedToolName || null
                     ]
                 );
 
@@ -803,7 +972,11 @@ async function readAllTraces(): Promise<any[]> {
                 accepted: row.accepted,
                 duplicateToolCallBlocked: row.duplicate_tool_call_blocked,
                 forcedFinalAfterSuccessfulEdit: row.forced_final_after_successful_edit,
-                maxToolRoundsReached: row.max_tool_rounds_reached
+                maxToolRoundsReached: row.max_tool_rounds_reached,
+                intentMode: row.intent_mode,
+                allowedTools: row.allowed_tools,
+                blockedByIntentGate: row.blocked_by_intent_gate,
+                blockedToolName: row.blocked_tool_name
             }));
         } catch (dbErr) {
             console.error("Failed to read traces from DB, reading from JSONL file instead:", dbErr);
@@ -829,6 +1002,11 @@ async function readAllTraces(): Promise<any[]> {
 export async function handleQwenAgentRequest(req: Request, res: Response): Promise<void> {
     const requestId = (req as any).requestId || crypto.randomUUID();
     const startTime = Date.now();
+    let firstCallUsage = { inputTokens: 0, outputTokens: 0 };
+    let retryCallUsage = { inputTokens: 0, outputTokens: 0 };
+    let firstCallLatencyMs = 0;
+    let retryCallLatencyMs = 0;
+    let firstValidationErrorReason: string | null = null;
     const clientHeaders: Record<string, string> = {
         "user-agent": req.header("user-agent") || "railway-ai-gateway"
     };
@@ -837,7 +1015,21 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
     injectPostSuccessStopHint(messages);
     const toolRoundCount = getToolRoundCount(messages);
 
-    const hasTools = Array.isArray(req.body.tools) && req.body.tools.length > 0;
+    const promptText = getUserPromptText(messages);
+    const intentMode = classifyIntent(promptText);
+    let allowedTools: string[] = [];
+    if (intentMode === "read_only") {
+        allowedTools = ["Read", "Grep", "Glob", "LS"];
+    } else if (intentMode === "edit_allowed") {
+        allowedTools = ["Read", "Grep", "Glob", "LS", "Write", "Edit", "MultiEdit"];
+    } else if (intentMode === "bash_allowed") {
+        allowedTools = ["Bash"];
+    }
+
+    const originalTools = Array.isArray(req.body.tools) ? req.body.tools : [];
+    const filteredTools = originalTools.filter((t: any) => allowedTools.includes(normalizeToolName(t.name)));
+
+    const hasTools = filteredTools.length > 0;
     const isStream = hasTools ? false : !!req.body.stream;
 
     const rawRepoKey = (req.headers?.["x-repo-key"] as string) || 
@@ -856,7 +1048,7 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
         mode: "qwen-agent",
         userIntent: getLatestUserIntent(messages),
         sanitizedMessages: messages,
-        availableToolNames: hasTools ? req.body.tools.map((t: any) => t.name) : [],
+        availableToolNames: filteredTools.map((t: any) => t.name),
         qwenRawOutput: "",
         fakeToolJsonDetected: false,
         fakeToolJsonConverted: false,
@@ -879,7 +1071,11 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
         repo_key: repoKey,
         duplicateToolCallBlocked: false,
         forcedFinalAfterSuccessfulEdit: false,
-        maxToolRoundsReached: false
+        maxToolRoundsReached: false,
+        intentMode,
+        allowedTools,
+        blockedByIntentGate: false,
+        blockedToolName: null
     };
 
     // Populate build status / result preview from historical last action
@@ -926,7 +1122,11 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
             status: 200,
             duplicateToolCallBlocked: false,
             forcedFinalAfterSuccessfulEdit: false,
-            maxToolRoundsReached: true
+            maxToolRoundsReached: true,
+            intentMode: traceData.intentMode,
+            allowedTools: traceData.allowedTools,
+            blockedByIntentGate: false,
+            blockedToolName: null
         }));
 
         res.json(payload);
@@ -947,6 +1147,9 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
 
     // 3. System instruction injection
     const finalBody = { ...req.body };
+    if (Array.isArray(finalBody.tools)) {
+        finalBody.tools = filteredTools;
+    }
 
     const rules = await getEnabledAdapterRules();
     const activeProfile = await getActivePromptProfile();
@@ -975,6 +1178,7 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
     let responseBody: any = null;
     let rawText = "";
 
+    const firstCallStart = Date.now();
     try {
         const upstream = await provider.handleRequest(finalBody, clientHeaders);
         if (!upstream.ok) {
@@ -1013,11 +1217,34 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
             traceData.finalAnswerPreview = accumulatedText;
             await saveQwenAgentTrace(traceData);
             await updateProfileStats(profileName, true);
+
+            // Log model call for Qwen Agent stream
+            await insertModelCall({
+                requestId,
+                provider: "qwen-local",
+                model: activeModelName,
+                inputTokens: 0,
+                outputTokens: 0,
+                latencyMs: Date.now() - firstCallStart,
+                qwenDraftMode: intentMode,
+                qwenDraftChars: accumulatedText.length,
+                qwenDraftWeak: false,
+                qwenRetryUsed: false,
+                qwenPatchMode: intentMode,
+                qwenPatchValid: true,
+                fileContextSource: "disk_exact",
+                qwenDelegationMode: "qwen-agent",
+                directEditEligible: true
+            });
+
             return;
         }
 
         rawText = await upstream.text();
+        firstCallLatencyMs = Date.now() - firstCallStart;
         responseBody = JSON.parse(rawText);
+        firstCallUsage.inputTokens = responseBody?.usage?.input_tokens || responseBody?.usage?.prompt_tokens || 0;
+        firstCallUsage.outputTokens = responseBody?.usage?.output_tokens || responseBody?.usage?.completion_tokens || 0;
     } catch (err: any) {
         res.status(503).json({
             error: {
@@ -1159,6 +1386,7 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
 
     // 4. Compact retry once if validation fails
     if (!validation.valid && validation.errorReason) {
+        firstValidationErrorReason = validation.errorReason;
         hasRetryHappened = true;
         traceData.toolRetryUsed = true;
 
@@ -1191,10 +1419,14 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
                 messages: retryMessages
             };
 
+            const retryCallStart = Date.now();
             const retryUpstream = await provider.handleRequest(retryBody, clientHeaders);
             if (retryUpstream.ok) {
                 const retryRawText = await retryUpstream.text();
+                retryCallLatencyMs = Date.now() - retryCallStart;
                 const retryResponse = JSON.parse(retryRawText);
+                retryCallUsage.inputTokens = retryResponse?.usage?.input_tokens || retryResponse?.usage?.prompt_tokens || 0;
+                retryCallUsage.outputTokens = retryResponse?.usage?.output_tokens || retryResponse?.usage?.completion_tokens || 0;
                 
                 // Re-evaluate retry response
                 processedResponse = { ...retryResponse };
@@ -1205,10 +1437,11 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
         }
     }
 
-    // Check duplicate or early stop if response has valid tool calls
+    // Check duplicate, early stop, or intent gate if response has valid tool calls
     if (validation.valid) {
         const toolUseBlocks = (processedResponse.content || []).filter((b: any) => b?.type === "tool_use");
         if (toolUseBlocks.length > 0) {
+            // 1. Check duplicate tool calls
             let isDuplicate = false;
             for (const block of toolUseBlocks) {
                 if (isToolCallDuplicate(block.name, block.input, messages)) {
@@ -1217,7 +1450,7 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
                 }
             }
 
-            // Check task early stop:
+            // 2. Check task early stop:
             // For single-file Write/Edit tasks, if one successful Write/Edit happened and no error exists, stop after the next assistant text response.
             let isEarlyStop = false;
             let successfulWriteEditCount = 0;
@@ -1260,9 +1493,35 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
                 isEarlyStop = true;
             }
 
-            if (isDuplicate || isEarlyStop) {
+            // 3. Check intent gate:
+            let isBlockedByGate = false;
+            let blockedToolName: string | null = null;
+            for (const block of toolUseBlocks) {
+                if (!allowedTools.includes(block.name)) {
+                    isBlockedByGate = true;
+                    blockedToolName = block.name;
+                    break;
+                }
+            }
+
+            if (isDuplicate || isEarlyStop || isBlockedByGate) {
                 let forcedText = "";
-                if (isDuplicate) {
+                if (isBlockedByGate) {
+                    traceData.blockedByIntentGate = true;
+                    traceData.blockedToolName = blockedToolName;
+
+                    if (intentMode === "chat_only") {
+                        forcedText = `Tool ${blockedToolName} is blocked. Tool calls are not allowed for general chat requests.`;
+                    } else if (intentMode === "read_only") {
+                        forcedText = `Tool ${blockedToolName} is blocked. Only read operations (Read, Grep, Glob, LS) are allowed.`;
+                    } else if (intentMode === "edit_allowed") {
+                        forcedText = `Tool ${blockedToolName} is blocked. Only read and edit operations are allowed.`;
+                    } else if (intentMode === "bash_allowed") {
+                        forcedText = `Tool ${blockedToolName} is blocked. Only Bash command execution is allowed.`;
+                    } else {
+                        forcedText = `Tool ${blockedToolName} is blocked by the intent gate.`;
+                    }
+                } else if (isDuplicate) {
                     traceData.duplicateToolCallBlocked = true;
                     forcedText = "The file changes have already been successfully applied. Provide the final summary now.";
                 } else if (isEarlyStop) {
@@ -1284,6 +1543,8 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
     }
 
     // 5. Final Output Handling
+    const fileContextSource = getFileContextSource(messages);
+
     if (!validation.valid) {
         // Validation failed twice
         const fallbackText = "Qwen-agent failed to produce a valid tool call.";
@@ -1305,6 +1566,68 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
         await saveQwenAgentTrace(traceData);
         await updateProfileStats(profileName, false);
 
+        // Insert model calls to DB
+        if (hasRetryHappened) {
+            // Log first call
+            await insertModelCall({
+                requestId,
+                provider: "qwen-local",
+                model: activeModelName,
+                inputTokens: firstCallUsage.inputTokens,
+                outputTokens: firstCallUsage.outputTokens,
+                latencyMs: firstCallLatencyMs,
+                qwenDraftMode: intentMode,
+                qwenDraftChars: 0,
+                qwenDraftWeak: true,
+                qwenRetryUsed: false,
+                qwenPatchMode: intentMode,
+                qwenPatchValid: false,
+                fallbackReason: firstValidationErrorReason || undefined,
+                fileContextSource,
+                qwenDelegationMode: "qwen-agent",
+                directEditEligible: true
+            });
+            // Log retry call
+            await insertModelCall({
+                requestId,
+                provider: "qwen-local",
+                model: activeModelName,
+                inputTokens: retryCallUsage.inputTokens,
+                outputTokens: retryCallUsage.outputTokens,
+                latencyMs: retryCallLatencyMs,
+                qwenDraftMode: intentMode,
+                qwenDraftChars: 0,
+                qwenDraftWeak: true,
+                qwenRetryUsed: true,
+                qwenPatchMode: intentMode,
+                qwenPatchValid: false,
+                fallbackReason: validation.errorReason || undefined,
+                fileContextSource,
+                qwenDelegationMode: "qwen-agent",
+                directEditEligible: true
+            });
+        } else {
+            // Log first call
+            await insertModelCall({
+                requestId,
+                provider: "qwen-local",
+                model: activeModelName,
+                inputTokens: firstCallUsage.inputTokens,
+                outputTokens: firstCallUsage.outputTokens,
+                latencyMs: firstCallLatencyMs,
+                qwenDraftMode: intentMode,
+                qwenDraftChars: 0,
+                qwenDraftWeak: true,
+                qwenRetryUsed: false,
+                qwenPatchMode: intentMode,
+                qwenPatchValid: false,
+                fallbackReason: validation.errorReason || undefined,
+                fileContextSource,
+                qwenDelegationMode: "qwen-agent",
+                directEditEligible: true
+            });
+        }
+
         console.log(JSON.stringify({
             time: new Date().toISOString(),
             requestId,
@@ -1323,7 +1646,11 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
             status: 200,
             duplicateToolCallBlocked: traceData.duplicateToolCallBlocked,
             forcedFinalAfterSuccessfulEdit: traceData.forcedFinalAfterSuccessfulEdit,
-            maxToolRoundsReached: traceData.maxToolRoundsReached
+            maxToolRoundsReached: traceData.maxToolRoundsReached,
+            intentMode: traceData.intentMode,
+            allowedTools: traceData.allowedTools,
+            blockedByIntentGate: traceData.blockedByIntentGate,
+            blockedToolName: traceData.blockedToolName
         }));
 
         res.json(failedResponse);
@@ -1340,6 +1667,66 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
 
     await saveQwenAgentTrace(traceData);
     await updateProfileStats(profileName, true);
+
+    // Insert model calls to DB
+    if (hasRetryHappened) {
+        // Log first call
+        await insertModelCall({
+            requestId,
+            provider: "qwen-local",
+            model: activeModelName,
+            inputTokens: firstCallUsage.inputTokens,
+            outputTokens: firstCallUsage.outputTokens,
+            latencyMs: firstCallLatencyMs,
+            qwenDraftMode: intentMode,
+            qwenDraftChars: 0,
+            qwenDraftWeak: true,
+            qwenRetryUsed: false,
+            qwenPatchMode: intentMode,
+            qwenPatchValid: false,
+            fallbackReason: firstValidationErrorReason || undefined,
+            fileContextSource,
+            qwenDelegationMode: "qwen-agent",
+            directEditEligible: true
+        });
+        // Log retry call
+        await insertModelCall({
+            requestId,
+            provider: "qwen-local",
+            model: activeModelName,
+            inputTokens: retryCallUsage.inputTokens,
+            outputTokens: retryCallUsage.outputTokens,
+            latencyMs: retryCallLatencyMs,
+            qwenDraftMode: intentMode,
+            qwenDraftChars: 0,
+            qwenDraftWeak: false,
+            qwenRetryUsed: true,
+            qwenPatchMode: intentMode,
+            qwenPatchValid: true,
+            fileContextSource,
+            qwenDelegationMode: "qwen-agent",
+            directEditEligible: true
+        });
+    } else {
+        // Log first call
+        await insertModelCall({
+            requestId,
+            provider: "qwen-local",
+            model: activeModelName,
+            inputTokens: firstCallUsage.inputTokens,
+            outputTokens: firstCallUsage.outputTokens,
+            latencyMs: firstCallLatencyMs,
+            qwenDraftMode: intentMode,
+            qwenDraftChars: 0,
+            qwenDraftWeak: false,
+            qwenRetryUsed: false,
+            qwenPatchMode: intentMode,
+            qwenPatchValid: true,
+            fileContextSource,
+            qwenDelegationMode: "qwen-agent",
+            directEditEligible: true
+        });
+    }
 
     console.log(JSON.stringify({
         time: new Date().toISOString(),
@@ -1359,7 +1746,11 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
         status: 200,
         duplicateToolCallBlocked: traceData.duplicateToolCallBlocked,
         forcedFinalAfterSuccessfulEdit: traceData.forcedFinalAfterSuccessfulEdit,
-        maxToolRoundsReached: traceData.maxToolRoundsReached
+        maxToolRoundsReached: traceData.maxToolRoundsReached,
+        intentMode: traceData.intentMode,
+        allowedTools: traceData.allowedTools,
+        blockedByIntentGate: traceData.blockedByIntentGate,
+        blockedToolName: traceData.blockedToolName
     }));
 
     res.json(processedResponse);
@@ -1401,7 +1792,11 @@ export async function exportQwenAgentTraces(req: Request, res: Response) {
                     humanVerdict: t.humanVerdict || "unknown",
                     duplicateToolCallBlocked: t.duplicateToolCallBlocked,
                     forcedFinalAfterSuccessfulEdit: t.forcedFinalAfterSuccessfulEdit,
-                    maxToolRoundsReached: t.maxToolRoundsReached
+                    maxToolRoundsReached: t.maxToolRoundsReached,
+                    intentMode: t.intentMode,
+                    allowedTools: t.allowedTools,
+                    blockedByIntentGate: t.blockedByIntentGate,
+                    blockedToolName: t.blockedToolName
                 }
             };
         });
