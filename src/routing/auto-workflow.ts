@@ -3,6 +3,7 @@ import { config } from "../config/env.js";
 import { providerRegistry } from "./registry.js";
 import { QwenLocalProvider } from "../providers/qwen-local.js";
 import { DeepSeekProvider } from "../providers/deepseek.js";
+import { normalizeRepoKey, buildMemoryPromptContext, insertTaskMemory, recordFailurePattern, classifyFailure } from "./memory.js";
 import fs from "fs";
 import path from "path";
 import { execSync } from "child_process";
@@ -130,6 +131,9 @@ export class AutoJobManager {
             return;
         }
 
+        const repoKey = job.repo_path ? normalizeRepoKey(job.repo_path) : "";
+        const editedFiles = new Set<string>();
+
         try {
             let messages: any[] = [{ role: "user", content: job.user_task }];
             let currentStep = 1;
@@ -148,9 +152,17 @@ JSON Schema:
   "target_files": ["files"],
   "steps_for_qwen": ["steps"]
 }`;
+                let finalPlanPrompt = planPrompt;
+                if (repoKey) {
+                    const memPrompt = await buildMemoryPromptContext(repoKey);
+                    if (memPrompt) {
+                        finalPlanPrompt = memPrompt + "\n\n" + planPrompt;
+                    }
+                }
+
                 const dsRes = await deepseekProvider.handleRequest({
                     model: job.controller_model || config.defaultModel,
-                    system: planPrompt,
+                    system: finalPlanPrompt,
                     messages: [{ role: "user", content: `Create plan for: ${job.user_task}` }],
                     stream: false,
                     temperature: 0.1
@@ -171,6 +183,12 @@ JSON Schema:
 
             // Append plan to system prompt if available
             let systemInstruction = "You are connected to local workspace tools. Use Read, Write, Edit, Grep, Glob, Bash to solve the user task.";
+            if (repoKey) {
+                const memPrompt = await buildMemoryPromptContext(repoKey);
+                if (memPrompt) {
+                    systemInstruction = memPrompt + "\n\n" + systemInstruction;
+                }
+            }
             if (plan) {
                 systemInstruction += `\n\nPlan to follow:\n${JSON.stringify(plan, null, 2)}`;
             }
@@ -232,6 +250,12 @@ JSON Schema:
                         resultText = execResult.output;
                         isError = execResult.isError;
                         
+                        if (!isError && (call.name === "Write" || call.name === "Edit")) {
+                            if (call.input.file_path) {
+                                editedFiles.add(call.input.file_path);
+                            }
+                        }
+
                         if (call.name === "Bash" && (call.input.command.includes("test") || call.input.command.includes("build"))) {
                             buildStatus = isError ? "failed" : "passed";
                         }
@@ -285,9 +309,17 @@ JSON Schema:
   "review_result": "pass" | "needs_fix",
   "instructions_for_qwen": ["instructions"]
 }`;
+                let finalReviewPrompt = reviewPrompt;
+                if (repoKey) {
+                    const memPrompt = await buildMemoryPromptContext(repoKey);
+                    if (memPrompt) {
+                        finalReviewPrompt = memPrompt + "\n\n" + reviewPrompt;
+                    }
+                }
+
                 const reviewRes = await deepseekProvider.handleRequest({
                     model: job.controller_model || config.defaultModel,
-                    system: reviewPrompt,
+                    system: finalReviewPrompt,
                     messages: [{ role: "user", content: `Task: ${job.user_task}\nEdits review history: ${JSON.stringify(messages.slice(-4))}` }],
                     stream: false,
                     temperature: 0.1
@@ -301,36 +333,78 @@ JSON Schema:
                         await this.logEvent(jobId, currentStep, "review_completed", review);
 
                         if (review.review_result === "pass") {
-                            await this.completeJob(jobId, finalSummary);
+                            await this.completeJob(jobId, finalSummary, Array.from(editedFiles));
                         } else {
                             await this.updateJobStatus(jobId, { status: "needs_human", failure_reason: "Reviewer rejected implementation" });
                             await this.logEvent(jobId, currentStep, "job_needs_human", { instructions: review.instructions_for_qwen });
+                            
+                            // Log failed review memory
+                            if (repoKey) {
+                                await insertTaskMemory({
+                                    repo_key: repoKey,
+                                    task_summary: job.user_task,
+                                    touched_files: Array.from(editedFiles),
+                                    outcome: "failed",
+                                    model_route: "hybrid",
+                                    cost_thb: 0
+                                });
+                                await recordFailurePattern(repoKey, "Reviewer Rejected", "Reviewer rejected implementation");
+                            }
                         }
                     } catch {
-                        await this.completeJob(jobId, finalSummary);
+                        await this.completeJob(jobId, finalSummary, Array.from(editedFiles));
                     }
                 } else {
-                    await this.completeJob(jobId, finalSummary);
+                    await this.completeJob(jobId, finalSummary, Array.from(editedFiles));
                 }
             } else {
-                await this.completeJob(jobId, finalSummary);
+                await this.completeJob(jobId, finalSummary, Array.from(editedFiles));
             }
 
         } catch (err: any) {
-            await this.failJob(jobId, err.message || "Unknown job failure");
+            await this.failJob(jobId, err.message || "Unknown job failure", Array.from(editedFiles));
         }
     }
 
-    private static async completeJob(jobId: number, summary: string) {
+    private static async completeJob(jobId: number, summary: string, touchedFiles: string[] = []) {
+        const job = await this.getJob(jobId);
         await this.updateJobStatus(jobId, { status: "completed", success: true, summary });
         await this.logEvent(jobId, 0, "job_completed", { summary });
         activeJobs.delete(jobId);
+
+        if (job) {
+            const rKey = job.repo_path ? normalizeRepoKey(job.repo_path) : "default";
+            await insertTaskMemory({
+                repo_key: rKey,
+                task_summary: job.user_task,
+                touched_files: touchedFiles,
+                outcome: "success",
+                model_route: job.mode === "smart" ? "hybrid" : "qwen-only",
+                cost_thb: 0
+            });
+        }
     }
 
-    private static async failJob(jobId: number, reason: string) {
+    private static async failJob(jobId: number, reason: string, touchedFiles: string[] = []) {
+        const job = await this.getJob(jobId);
         await this.updateJobStatus(jobId, { status: "failed", success: false, failure_reason: reason });
         await this.logEvent(jobId, 0, "job_failed", { reason });
         activeJobs.delete(jobId);
+
+        if (job) {
+            const rKey = job.repo_path ? normalizeRepoKey(job.repo_path) : "default";
+            await insertTaskMemory({
+                repo_key: rKey,
+                task_summary: job.user_task,
+                touched_files: touchedFiles,
+                outcome: "failed",
+                model_route: job.mode === "smart" ? "hybrid" : "qwen-only",
+                cost_thb: 0
+            });
+
+            const pType = classifyFailure(reason);
+            await recordFailurePattern(rKey, pType, reason);
+        }
     }
 
     // Helper to execute tools on local filesystem

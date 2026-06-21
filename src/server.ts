@@ -4,6 +4,7 @@ import path from "path";
 import { config } from "./config/env.js";
 import { gatewayRouter } from "./routes/gateway.js";
 import "./routes/qwen-metrics.js";
+import "./routes/metrics-memory-routes.js";
 
 const app = express();
 

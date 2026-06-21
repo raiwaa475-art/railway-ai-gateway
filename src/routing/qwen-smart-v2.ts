@@ -7,6 +7,7 @@ import { DeepSeekProvider } from "../providers/deepseek.js";
 import { pool, insertModelCall } from "../utils/db.js";
 import { handleQwenAgentRequest } from "./qwen-agent.js";
 import { calculateDeepSeekCost, extractDeepSeekUsage } from "../utils/pricing.js";
+import { normalizeRepoKey, buildMemoryPromptContext, insertTaskMemory, recordFailurePattern, classifyFailure } from "./memory.js";
 
 // Helper to check for code or patch patterns in text
 function containsCodeOrPatch(text: string): boolean {
@@ -57,6 +58,15 @@ export async function handleQwenSmartV2Request(req: Request, res: Response): Pro
     };
 
     const messages = req.body.messages || [];
+    
+    const rawRepoKey = (req.headers["x-repo-key"] as string) || 
+                       (req.headers["x-repo-path"] as string) || 
+                       req.body.repo_key || 
+                       req.body.repo_path || 
+                       (req.query.repoKey as string) || 
+                       (req.query.repo_key as string) || 
+                       "";
+    const repoKey = rawRepoKey ? normalizeRepoKey(rawRepoKey) : "";
     
     // Count previous tool rounds
     let toolRoundCount = 0;
@@ -142,11 +152,19 @@ JSON Schema:
         let controllerViolation = false;
         let controllerPayload: any = null;
 
+        let finalSystem = systemPrompt;
+        if (repoKey) {
+            const memPrompt = await buildMemoryPromptContext(repoKey);
+            if (memPrompt) {
+                finalSystem = memPrompt + "\n\n" + systemPrompt;
+            }
+        }
+
         try {
             // First attempt
             const dsRes = await deepseekProvider.handleRequest({
                 model: config.defaultModel,
-                system: systemPrompt,
+                system: finalSystem,
                 messages: [{ role: "user", content: `Review the task and create a plan: ${JSON.stringify(messages)}` }],
                 stream: false,
                 temperature: 0.1,
@@ -187,7 +205,7 @@ JSON Schema:
 Please rewrite the plan. Output ONLY a valid JSON object. No explanations. No code blocks.`;
                 const dsRetryRes = await deepseekProvider.handleRequest({
                     model: config.defaultModel,
-                    system: systemPrompt,
+                    system: finalSystem,
                     messages: [
                         { role: "user", content: `Review the task and create a plan: ${JSON.stringify(messages)}` },
                         { role: "assistant", content: controllerText },
@@ -216,6 +234,12 @@ Please rewrite the plan. Output ONLY a valid JSON object. No explanations. No co
 
     // Call Qwen Local to run the execution
     const qwenBody = { ...req.body };
+    if (repoKey) {
+        const memPrompt = await buildMemoryPromptContext(repoKey);
+        if (memPrompt) {
+            qwenBody.system = memPrompt + "\n\n" + (qwenBody.system || "");
+        }
+    }
     if (planPromptSuffix) {
         qwenBody.system = (qwenBody.system ? qwenBody.system + "\n\n" : "") + planPromptSuffix;
     }
@@ -249,10 +273,18 @@ JSON Schema:
             let reviewText = "";
             let reviewPayload: any = null;
 
+            let finalReviewSystem = reviewPrompt;
+            if (repoKey) {
+                const memPrompt = await buildMemoryPromptContext(repoKey);
+                if (memPrompt) {
+                    finalReviewSystem = memPrompt + "\n\n" + reviewPrompt;
+                }
+            }
+
             try {
                 const dsReviewRes = await deepseekProvider.handleRequest({
                     model: config.defaultModel,
-                    system: reviewPrompt,
+                    system: finalReviewSystem,
                     messages: [{ role: "user", content: `Original request and worker response history:\n${JSON.stringify(messages)}\n\nWorker final response:\n${JSON.stringify(qwenData)}` }],
                     stream: false,
                     temperature: 0.1,
@@ -317,11 +349,30 @@ JSON Schema:
                         
                         if (pool) {
                             await pool.query(
-                                `INSERT INTO qwen_agent_traces (request_id, timestamp, mode, user_intent, success, controller_plan, controller_review, accepted)
-                                 VALUES ($1, CURRENT_TIMESTAMP, $2, $3, $4, $5, $6, $7)
-                                 ON CONFLICT (request_id) DO UPDATE SET success = EXCLUDED.success, controller_review = EXCLUDED.controller_review`,
-                                [requestId, "qwen-smart-v2", messages[0]?.content || "", true, traceData.controllerPlan, traceData.controllerReview, false]
+                                `INSERT INTO qwen_agent_traces (request_id, timestamp, mode, user_intent, success, controller_plan, controller_review, accepted, repo_key)
+                                 VALUES ($1, CURRENT_TIMESTAMP, $2, $3, $4, $5, $6, $7, $8)
+                                 ON CONFLICT (request_id) DO UPDATE SET success = EXCLUDED.success, controller_review = EXCLUDED.controller_review, repo_key = EXCLUDED.repo_key`,
+                                [requestId, "qwen-smart-v2", messages[0]?.content || "", true, traceData.controllerPlan, traceData.controllerReview, false, repoKey || null]
                             );
+                        }
+
+                        if (repoKey) {
+                            let costThb = 0;
+                            try {
+                                if (pool) {
+                                    const costRes = await pool.query("SELECT COALESCE(SUM(cost_thb), 0) as total FROM model_calls WHERE request_id = $1", [requestId]);
+                                    costThb = Number(costRes.rows[0]?.total || 0);
+                                }
+                            } catch {}
+
+                            await insertTaskMemory({
+                                repo_key: repoKey,
+                                task_summary: messages[0]?.content || "Qwen Smart v2 task",
+                                touched_files: traceData.qwenEditedFiles || [],
+                                outcome: "success",
+                                model_route: "qwen-smart-v2",
+                                cost_thb: costThb
+                            });
                         }
 
                         console.log(JSON.stringify({
@@ -356,11 +407,30 @@ JSON Schema:
         traceData.success = true;
         if (pool) {
             await pool.query(
-                `INSERT INTO qwen_agent_traces (request_id, timestamp, mode, user_intent, success, controller_plan, controller_review, accepted)
-                 VALUES ($1, CURRENT_TIMESTAMP, $2, $3, $4, $5, $6, $7)
-                 ON CONFLICT (request_id) DO UPDATE SET success = EXCLUDED.success, controller_plan = EXCLUDED.controller_plan, controller_review = EXCLUDED.controller_review, accepted = EXCLUDED.accepted`,
-                [requestId, "qwen-smart-v2", messages[0]?.content || "", true, traceData.controllerPlan, traceData.controllerReview, traceData.accepted]
+                `INSERT INTO qwen_agent_traces (request_id, timestamp, mode, user_intent, success, controller_plan, controller_review, accepted, repo_key)
+                 VALUES ($1, CURRENT_TIMESTAMP, $2, $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT (request_id) DO UPDATE SET success = EXCLUDED.success, controller_plan = EXCLUDED.controller_plan, controller_review = EXCLUDED.controller_review, accepted = EXCLUDED.accepted, repo_key = EXCLUDED.repo_key`,
+                [requestId, "qwen-smart-v2", messages[0]?.content || "", true, traceData.controllerPlan, traceData.controllerReview, traceData.accepted, repoKey || null]
             );
+        }
+
+        if (repoKey) {
+            let costThb = 0;
+            try {
+                if (pool) {
+                    const costRes = await pool.query("SELECT COALESCE(SUM(cost_thb), 0) as total FROM model_calls WHERE request_id = $1", [requestId]);
+                    costThb = Number(costRes.rows[0]?.total || 0);
+                }
+            } catch {}
+
+            await insertTaskMemory({
+                repo_key: repoKey,
+                task_summary: messages[0]?.content || "Qwen Smart v2 task",
+                touched_files: traceData.qwenEditedFiles || [],
+                outcome: "success",
+                model_route: "qwen-smart-v2",
+                cost_thb: costThb
+            });
         }
 
         console.log(JSON.stringify({
@@ -386,25 +456,28 @@ JSON Schema:
         res.json(qwenData);
 
     } catch (err: any) {
-        console.log(JSON.stringify({
-            time: new Date().toISOString(),
-            requestId,
-            mode: "qwen-smart-v2",
-            provider: "qwen-local",
-            finalProvider: "qwen-local",
-            deepseekFallbackUsed: false,
-            qwenWorkerUsed: true,
-            deepseekWroteCode: false,
-            claudeWroteCode: false,
-            controllerModel: traceData.controllerModel,
-            controllerRole: traceData.controllerRole,
-            controllerViolation: traceData.controllerViolation,
-            controllerWroteCodeViolation: traceData.controllerViolation,
-            qwenEditedFiles: traceData.qwenEditedFiles,
-            reviewResult: traceData.reviewResult,
-            success: false,
-            failureReason: err.message
-        }));
+        if (repoKey) {
+            let costThb = 0;
+            try {
+                if (pool) {
+                    const costRes = await pool.query("SELECT COALESCE(SUM(cost_thb), 0) as total FROM model_calls WHERE request_id = $1", [requestId]);
+                    costThb = Number(costRes.rows[0]?.total || 0);
+                }
+            } catch {}
+
+            await insertTaskMemory({
+                repo_key: repoKey,
+                task_summary: messages[0]?.content || "Qwen Smart v2 task",
+                touched_files: traceData.qwenEditedFiles || [],
+                outcome: "failed",
+                model_route: "qwen-smart-v2",
+                cost_thb: costThb
+            });
+
+            const failReason = err.message || "Smart controller error";
+            const pType = classifyFailure(failReason);
+            await recordFailurePattern(repoKey, pType, failReason);
+        }
 
         res.status(500).json({ error: { type: "server_error", message: err.message || "Smart controller error" } });
     }

@@ -234,6 +234,48 @@ export async function initDb() {
             ON CONFLICT (name) DO NOTHING;
         `, [defaultPrompt]);
 
+        // Memory Feature tables
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS repo_memories (
+                id SERIAL PRIMARY KEY,
+                repo_key VARCHAR(255) UNIQUE NOT NULL,
+                summary TEXT,
+                important_files JSONB DEFAULT '[]'::jsonb,
+                risk_zones JSONB DEFAULT '[]'::jsonb,
+                tech_stack JSONB DEFAULT '[]'::jsonb,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS task_memories (
+                id SERIAL PRIMARY KEY,
+                repo_key VARCHAR(255) NOT NULL,
+                task_summary TEXT,
+                touched_files JSONB DEFAULT '[]'::jsonb,
+                outcome VARCHAR(50),
+                model_route VARCHAR(50),
+                cost_thb NUMERIC(12, 6) DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS failure_patterns (
+                id SERIAL PRIMARY KEY,
+                repo_key VARCHAR(255) NOT NULL,
+                pattern_type VARCHAR(100) NOT NULL,
+                failure_reason TEXT,
+                examples JSONB DEFAULT '[]'::jsonb,
+                hit_count INTEGER DEFAULT 1,
+                last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (repo_key, pattern_type)
+            );
+        `);
+
+        // Safely alter existing tables for memory key tracking
+        await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS repo_key VARCHAR(255);`);
+
         console.log("Database tables initialized successfully.");
     } catch (err) {
         console.error("Failed to initialize database tables:", err);

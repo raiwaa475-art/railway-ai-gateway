@@ -17,6 +17,7 @@ import {
     updateProfileStats, 
     incrementRuleHit 
 } from "./tuning.js";
+import { normalizeRepoKey, buildMemoryPromptContext, insertTaskMemory, recordFailurePattern, classifyFailure } from "./memory.js";
 
 const TRACE_FILE_PATH = path.join(process.cwd(), "qwen_agent_traces.jsonl");
 
@@ -439,7 +440,7 @@ function sanitizeObject(obj: any): any {
         for (const [key, val] of Object.entries(obj)) {
             const lowerKey = key.toLowerCase();
             if (
-                lowerKey.includes("key") ||
+                (lowerKey.includes("key") && lowerKey !== "repo_key" && lowerKey !== "repokey") ||
                 lowerKey.includes("password") ||
                 lowerKey.includes("secret") ||
                 lowerKey.includes("token") ||
@@ -537,8 +538,8 @@ async function saveQwenAgentTrace(traceData: any) {
             try {
                 await pool.query(
                     `INSERT INTO qwen_agent_traces 
-                    (request_id, timestamp, mode, user_intent, sanitized_messages, available_tool_names, qwen_raw_output, fake_tool_json_detected, fake_tool_json_converted, requested_tool_name, normalized_tool_name, original_tool_args, repaired_tool_args, tool_args_repaired, tool_validation_error, tool_retry_used, tool_round_count, tool_result_preview, final_answer_preview, edited_files, build_status, success, failure_reason, human_verdict, prompt_profile_name, prompt_profile_version, controller_plan, controller_review, qwen_worker_trace_ids, final_result, accepted) 
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)
+                    (request_id, timestamp, mode, user_intent, sanitized_messages, available_tool_names, qwen_raw_output, fake_tool_json_detected, fake_tool_json_converted, requested_tool_name, normalized_tool_name, original_tool_args, repaired_tool_args, tool_args_repaired, tool_validation_error, tool_retry_used, tool_round_count, tool_result_preview, final_answer_preview, edited_files, build_status, success, failure_reason, human_verdict, prompt_profile_name, prompt_profile_version, controller_plan, controller_review, qwen_worker_trace_ids, final_result, accepted, repo_key) 
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)
                     ON CONFLICT (request_id) DO UPDATE SET
                     timestamp = EXCLUDED.timestamp,
                     mode = EXCLUDED.mode,
@@ -569,7 +570,8 @@ async function saveQwenAgentTrace(traceData: any) {
                     controller_review = EXCLUDED.controller_review,
                     qwen_worker_trace_ids = EXCLUDED.qwen_worker_trace_ids,
                     final_result = EXCLUDED.final_result,
-                    accepted = EXCLUDED.accepted`,
+                    accepted = EXCLUDED.accepted,
+                    repo_key = EXCLUDED.repo_key`,
                     [
                         sanitized.requestId,
                         new Date(sanitized.timestamp || Date.now()),
@@ -601,9 +603,39 @@ async function saveQwenAgentTrace(traceData: any) {
                         sanitized.controllerReview || null,
                         sanitized.qwenWorkerTraceIds || null,
                         sanitized.finalResult || null,
-                        sanitized.accepted !== undefined ? sanitized.accepted : null
+                        sanitized.accepted !== undefined ? sanitized.accepted : null,
+                        sanitized.repo_key || sanitized.repoKey || null
                     ]
                 );
+
+                // Auto record task memory and failure pattern
+                const rKey = sanitized.repo_key || sanitized.repoKey;
+                if (rKey) {
+                    const isFinalRound = sanitized.finalAnswerPreview && (!sanitized.requestedToolName);
+                    const isFailed = !sanitized.success;
+                    if (isFinalRound || isFailed) {
+                        let costThb = 0;
+                        try {
+                            const costRes = await pool.query("SELECT COALESCE(SUM(cost_thb), 0) as total FROM model_calls WHERE request_id = $1", [sanitized.requestId]);
+                            costThb = Number(costRes.rows[0]?.total || 0);
+                        } catch {}
+
+                        await insertTaskMemory({
+                            repo_key: rKey,
+                            task_summary: sanitized.userIntent || "Qwen agent task",
+                            touched_files: sanitized.editedFiles || [],
+                            outcome: sanitized.success ? "success" : "failed",
+                            model_route: sanitized.mode === "qwen-smart-v2" ? "qwen-smart-v2" : "qwen-only",
+                            cost_thb: costThb
+                        });
+
+                        if (!sanitized.success) {
+                            const failReason = sanitized.failureReason || sanitized.toolValidationError || "Unknown failure";
+                            const pType = classifyFailure(failReason);
+                            await recordFailurePattern(rKey, pType, failReason);
+                        }
+                    }
+                }
                 return;
             } catch (dbErr) {
                 console.error("Failed to save trace to DB, falling back to JSONL:", dbErr);
@@ -691,6 +723,15 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
     const hasTools = Array.isArray(req.body.tools) && req.body.tools.length > 0;
     const isStream = hasTools ? false : !!req.body.stream;
 
+    const rawRepoKey = (req.headers["x-repo-key"] as string) || 
+                       (req.headers["x-repo-path"] as string) || 
+                       req.body.repo_key || 
+                       req.body.repo_path || 
+                       (req.query.repoKey as string) || 
+                       (req.query.repo_key as string) || 
+                       "";
+    const repoKey = rawRepoKey ? normalizeRepoKey(rawRepoKey) : "";
+
     // Build initial trace values
     const traceData: any = {
         requestId,
@@ -716,7 +757,9 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
         buildStatus: "not_run",
         success: false,
         failureReason: null,
-        humanVerdict: "unknown"
+        humanVerdict: "unknown",
+        repoKey: repoKey,
+        repo_key: repoKey
     };
 
     // Populate build status / result preview from historical last action
@@ -791,6 +834,13 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
 
     let systemPrompt = activeProfile ? activeProfile.system_prompt : QWEN_AGENT_SYSTEM_INSTRUCTION;
     systemPrompt = await applySystemPromptHintRules(systemPrompt, traceData.userIntent, rules);
+
+    if (repoKey) {
+        const memContext = await buildMemoryPromptContext(repoKey);
+        if (memContext) {
+            systemPrompt = memContext + "\n\n" + systemPrompt;
+        }
+    }
 
     finalBody.system = (finalBody.system ? finalBody.system + "\n\n" : "") + systemPrompt;
     finalBody.stream = isStream;
