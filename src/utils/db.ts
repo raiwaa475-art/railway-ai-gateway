@@ -100,6 +100,36 @@ export async function initDb() {
             );
         `);
 
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS qwen_agent_traces (
+                id SERIAL PRIMARY KEY,
+                request_id VARCHAR(255) UNIQUE,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                mode VARCHAR(50),
+                user_intent TEXT,
+                sanitized_messages JSONB,
+                available_tool_names TEXT[],
+                qwen_raw_output TEXT,
+                fake_tool_json_detected BOOLEAN,
+                fake_tool_json_converted BOOLEAN,
+                requested_tool_name VARCHAR(255),
+                normalized_tool_name VARCHAR(255),
+                original_tool_args JSONB,
+                repaired_tool_args JSONB,
+                tool_args_repaired BOOLEAN,
+                tool_validation_error TEXT,
+                tool_retry_used BOOLEAN,
+                tool_round_count INTEGER,
+                tool_result_preview TEXT,
+                final_answer_preview TEXT,
+                edited_files TEXT[],
+                build_status VARCHAR(50),
+                success BOOLEAN,
+                failure_reason TEXT,
+                human_verdict VARCHAR(50) DEFAULT 'unknown'
+            );
+        `);
+
         // Safely add columns to existing tables
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS input_cost_usd NUMERIC(12, 6) DEFAULT 0;`);
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS input_cost_thb NUMERIC(12, 6) DEFAULT 0;`);

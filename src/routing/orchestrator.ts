@@ -1,4 +1,4 @@
-﻿import { Request, Response as ExpressResponse } from "express";
+import { Request, Response as ExpressResponse } from "express";
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
@@ -10,6 +10,7 @@ import { insertModelCall, updateGatewayRequest } from "../utils/db.js";
 import { extractDeepSeekUsage, calculateDeepSeekCost } from "../utils/pricing.js";
 import { ConfidenceRiskLevel, evaluateConfidence } from "./confidence.js";
 import { handleQwenOnlyLowRiskRequest } from "./qwen-only-low-risk.js";
+import { handleQwenAgentRequest } from "./qwen-agent.js";
 
 type FileContextSource =
     | "tool_result_exact"
@@ -1740,6 +1741,9 @@ Expected JSON shape:
 
     static async handleQwenOnlyLowRisk(req: Request, res: ExpressResponse): Promise<void> {
         return handleQwenOnlyLowRiskRequest(req, res);
+    }
+    static async handleQwenAgent(req: Request, res: ExpressResponse): Promise<void> {
+        return handleQwenAgentRequest(req, res);
     }
     static async handleTwinModels(req: Request, res: ExpressResponse): Promise<void> {
         const requestId = (req as any).requestId || crypto.randomUUID();

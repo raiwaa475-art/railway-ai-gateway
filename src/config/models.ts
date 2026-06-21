@@ -29,6 +29,12 @@ export const SUPPORTED_MODELS: ModelDefinition[] = [
         displayName: "Qwen Only Low Risk",
         providerId: "hybrid",
         aliases: ["qwen-only-low-risk"]
+    },
+    {
+        id: "qwen-agent",
+        displayName: "Qwen Agent",
+        providerId: "qwen-local",
+        aliases: ["qwen-agent", "qwen-code"]
     }
 ];
 

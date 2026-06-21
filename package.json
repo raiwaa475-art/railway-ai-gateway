@@ -6,6 +6,7 @@
         "dev": "tsx src/server.ts",
         "build": "tsc",
         "smoke:qwen-only-low-risk": "tsx scripts/qwen-only-low-risk-smoke.ts",
+        "smoke:qwen-agent": "tsx scripts/qwen-agent-smoke.ts",
         "start": "node dist/server.js"
     },
     "dependencies": {

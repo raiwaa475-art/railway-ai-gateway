@@ -1,4 +1,4 @@
-﻿import { Router } from "express";
+import { Router } from "express";
 import crypto from "crypto";
 import path from "path";
 import { authMiddleware } from "../auth.js";
@@ -12,6 +12,7 @@ import { ProviderStore } from "../utils/provider-store.js";
 import { ProviderService } from "../utils/provider-service.js";
 import { createOpenAiToAnthropicStream } from "../utils/stream-handler.js";
 import { extractDeepSeekUsage, calculateDeepSeekCost } from "../utils/pricing.js";
+import { exportQwenAgentTraces, getQwenAgentTracesSummary } from "../routing/qwen-agent.js";
 
 export const gatewayRouter = Router();
 
@@ -487,6 +488,57 @@ gatewayRouter.post("/v1/messages", authMiddleware, async (req, res) => {
         console.error("Configurable provider routing error:", e);
     }
 
+    if (clientModel === "qwen-agent" || clientModel === "qwen-code") {
+        logRequest({
+            type: "request",
+            requestId,
+            method: req.method,
+            path: req.path,
+            clientModel,
+            upstreamModel: "qwen-agent",
+            stream: isStream,
+            provider: "qwen-local"
+        });
+        try {
+            (req as any).requestId = requestId;
+            await OrchestratorService.handleQwenAgent(req, res);
+            logRequest({
+                type: "response",
+                requestId,
+                method: req.method,
+                path: req.path,
+                clientModel,
+                upstreamModel: "qwen-agent",
+                status: res.statusCode || 200,
+                latencyMs: Date.now() - startTime,
+                stream: isStream,
+                provider: "qwen-local"
+            });
+        } catch (err: any) {
+            logRequest({
+                type: "response",
+                requestId,
+                method: req.method,
+                path: req.path,
+                clientModel,
+                upstreamModel: "qwen-agent",
+                status: 500,
+                latencyMs: Date.now() - startTime,
+                stream: isStream,
+                errorMessage: err.message,
+                provider: "qwen-local"
+            });
+            await updateGatewayRequest(requestId, 500, Date.now() - startTime);
+            res.status(500).json({
+                error: {
+                    type: "gateway_error",
+                    message: err.message || "Unknown error inside Qwen-agent orchestrator"
+                }
+            });
+        }
+        return;
+    }
+
     if (clientModel === "qwen-only-low-risk") {
         logRequest({
             type: "request",
@@ -949,6 +1001,9 @@ gatewayRouter.get("/admin/usage/recent", adminAuthMiddleware, async (req, res) =
         res.status(500).json({ error: err.message });
     }
 });
+
+gatewayRouter.get("/admin/qwen-agent/traces/export", adminAuthMiddleware, exportQwenAgentTraces);
+gatewayRouter.get("/admin/qwen-agent/traces/summary", adminAuthMiddleware, getQwenAgentTracesSummary);
 
 gatewayRouter.post("/admin/usage/clear", adminAuthMiddleware, async (req, res) => {
     if (!pool) {

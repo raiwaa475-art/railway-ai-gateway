@@ -43,5 +43,11 @@ export const config = {
     qwenLocalMaxTokens: Number(process.env.QWEN_LOCAL_MAX_TOKENS || 32000),
     qwenLocalTimeoutMs: Number(process.env.QWEN_LOCAL_TIMEOUT_MS || 180000),
     qwenOnlyLowRiskEnabled: process.env.QWEN_ONLY_LOW_RISK_ENABLED === "true",
-    allowRailwayDiskFileContext: process.env.ALLOW_RAILWAY_DISK_FILE_CONTEXT === "true"
+    allowRailwayDiskFileContext: process.env.ALLOW_RAILWAY_DISK_FILE_CONTEXT === "true",
+    qwenAgentEnabled: process.env.QWEN_AGENT_ENABLED === "true",
+    qwenAgentMaxToolRounds: Number(process.env.QWEN_AGENT_MAX_TOOL_ROUNDS || 8),
+    qwenAgentToolRetryLimit: Number(process.env.QWEN_AGENT_TOOL_RETRY_LIMIT || 1),
+    qwenAgentTraceEnabled: process.env.QWEN_AGENT_TRACE_ENABLED === "true",
+    qwenAgentTraceSanitize: process.env.QWEN_AGENT_TRACE_SANITIZE !== "false",
+    qwenAgentTraceMaxChars: Number(process.env.QWEN_AGENT_TRACE_MAX_CHARS || 20000)
 };
