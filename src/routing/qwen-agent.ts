@@ -6,6 +6,17 @@ import { config } from "../config/env.js";
 import { providerRegistry } from "./registry.js";
 import { QwenLocalProvider } from "../providers/qwen-local.js";
 import { pool } from "../utils/db.js";
+import { 
+    getActivePromptProfile, 
+    getEnabledAdapterRules, 
+    applyToolAliasRules, 
+    applyArgAliasRules, 
+    checkBashBlockRules, 
+    getRetryHintRule, 
+    applySystemPromptHintRules, 
+    updateProfileStats, 
+    incrementRuleHit 
+} from "./tuning.js";
 
 const TRACE_FILE_PATH = path.join(process.cwd(), "qwen_agent_traces.jsonl");
 
@@ -54,9 +65,13 @@ function normalizeToolName(name: string): string {
     if (["run_command", "shell", "cmd"].includes(norm)) {
         return "Bash";
     }
+    // todowrite -> TodoWrite
+    if (["todowrite", "todo_write"].includes(norm)) {
+        return "TodoWrite";
+    }
     
     // Return capitalized canonical name if it matches case-insensitively
-    const canonicals = ["Read", "LS", "Grep", "Glob", "Write", "Edit", "MultiEdit", "Bash"];
+    const canonicals = ["Read", "LS", "Grep", "Glob", "Write", "Edit", "MultiEdit", "Bash", "TodoWrite"];
     const found = canonicals.find(c => c.toLowerCase() === norm);
     if (found) return found;
 
@@ -215,8 +230,11 @@ function isCommandDangerous(command: string): string | null {
     if (cmd.includes("railway up")) return "railway up";
     if (cmd.includes("vercel --prod")) return "vercel --prod";
     
-    if (/(?:>|>>|tee|out-file)\s*[^>]*\.env/i.test(cmd)) return "writing .env";
-    if (/(?:>|>>|tee|out-file)\s*[^>]*secrets/i.test(cmd)) return "writing secrets";
+    if (/(?:>|>>|tee|out-file)\s*[^>]*\.env/i.test(cmd) || cmd.includes(".env")) return "writing .env";
+    if (/(?:>|>>|tee|out-file)\s*[^>]*secrets/i.test(cmd) || cmd.includes("secrets")) return "writing secrets";
+    
+    if (cmd.includes("private key") || cmd.includes("private_key") || cmd.includes("private keys")) return "private keys";
+    if (cmd.includes("api key") || cmd.includes("api_key") || cmd.includes("apikey") || cmd.includes("api keys")) return "API keys";
 
     return null;
 }
@@ -519,8 +537,8 @@ async function saveQwenAgentTrace(traceData: any) {
             try {
                 await pool.query(
                     `INSERT INTO qwen_agent_traces 
-                    (request_id, timestamp, mode, user_intent, sanitized_messages, available_tool_names, qwen_raw_output, fake_tool_json_detected, fake_tool_json_converted, requested_tool_name, normalized_tool_name, original_tool_args, repaired_tool_args, tool_args_repaired, tool_validation_error, tool_retry_used, tool_round_count, tool_result_preview, final_answer_preview, edited_files, build_status, success, failure_reason, human_verdict) 
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+                    (request_id, timestamp, mode, user_intent, sanitized_messages, available_tool_names, qwen_raw_output, fake_tool_json_detected, fake_tool_json_converted, requested_tool_name, normalized_tool_name, original_tool_args, repaired_tool_args, tool_args_repaired, tool_validation_error, tool_retry_used, tool_round_count, tool_result_preview, final_answer_preview, edited_files, build_status, success, failure_reason, human_verdict, prompt_profile_name, prompt_profile_version, controller_plan, controller_review, qwen_worker_trace_ids, final_result, accepted) 
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)
                     ON CONFLICT (request_id) DO UPDATE SET
                     timestamp = EXCLUDED.timestamp,
                     mode = EXCLUDED.mode,
@@ -544,7 +562,14 @@ async function saveQwenAgentTrace(traceData: any) {
                     build_status = EXCLUDED.build_status,
                     success = EXCLUDED.success,
                     failure_reason = EXCLUDED.failure_reason,
-                    human_verdict = EXCLUDED.human_verdict`,
+                    human_verdict = EXCLUDED.human_verdict,
+                    prompt_profile_name = EXCLUDED.prompt_profile_name,
+                    prompt_profile_version = EXCLUDED.prompt_profile_version,
+                    controller_plan = EXCLUDED.controller_plan,
+                    controller_review = EXCLUDED.controller_review,
+                    qwen_worker_trace_ids = EXCLUDED.qwen_worker_trace_ids,
+                    final_result = EXCLUDED.final_result,
+                    accepted = EXCLUDED.accepted`,
                     [
                         sanitized.requestId,
                         new Date(sanitized.timestamp || Date.now()),
@@ -569,7 +594,14 @@ async function saveQwenAgentTrace(traceData: any) {
                         sanitized.buildStatus,
                         sanitized.success,
                         sanitized.failureReason,
-                        sanitized.humanVerdict || 'unknown'
+                        sanitized.humanVerdict || 'unknown',
+                        sanitized.promptProfileName || null,
+                        sanitized.promptProfileVersion || null,
+                        sanitized.controllerPlan || null,
+                        sanitized.controllerReview || null,
+                        sanitized.qwenWorkerTraceIds || null,
+                        sanitized.finalResult || null,
+                        sanitized.accepted !== undefined ? sanitized.accepted : null
                     ]
                 );
                 return;
@@ -616,7 +648,14 @@ async function readAllTraces(): Promise<any[]> {
                 buildStatus: row.build_status,
                 success: row.success,
                 failureReason: row.failure_reason,
-                humanVerdict: row.human_verdict
+                humanVerdict: row.human_verdict,
+                promptProfileName: row.prompt_profile_name,
+                promptProfileVersion: row.prompt_profile_version,
+                controllerPlan: row.controller_plan,
+                controllerReview: row.controller_review,
+                qwenWorkerTraceIds: row.qwen_worker_trace_ids,
+                finalResult: row.final_result,
+                accepted: row.accepted
             }));
         } catch (dbErr) {
             console.error("Failed to read traces from DB, reading from JSONL file instead:", dbErr);
@@ -741,7 +780,19 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
 
     // 3. System instruction injection
     const finalBody = { ...req.body };
-    finalBody.system = (finalBody.system ? finalBody.system + "\n\n" : "") + QWEN_AGENT_SYSTEM_INSTRUCTION;
+
+    const rules = await getEnabledAdapterRules();
+    const activeProfile = await getActivePromptProfile();
+    const profileName = activeProfile ? activeProfile.name : "qwen-agent-default";
+    const profileVersion = activeProfile ? "1.0.0" : "default";
+
+    traceData.promptProfileName = profileName;
+    traceData.promptProfileVersion = profileVersion;
+
+    let systemPrompt = activeProfile ? activeProfile.system_prompt : QWEN_AGENT_SYSTEM_INSTRUCTION;
+    systemPrompt = await applySystemPromptHintRules(systemPrompt, traceData.userIntent, rules);
+
+    finalBody.system = (finalBody.system ? finalBody.system + "\n\n" : "") + systemPrompt;
     finalBody.stream = isStream;
 
     const runtimeConfig = await provider.resolveRuntimeConfig();
@@ -787,6 +838,7 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
             traceData.success = true;
             traceData.finalAnswerPreview = accumulatedText;
             await saveQwenAgentTrace(traceData);
+            await updateProfileStats(profileName, true);
             return;
         }
 
@@ -868,6 +920,13 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
             if (block?.type === "tool_use") {
                 traceData.requestedToolName = block.name;
 
+                // Apply tool alias rules
+                const aliasResult = await applyToolAliasRules(block.name, rules);
+                block.name = aliasResult.name;
+                if (aliasResult.hitRuleId) {
+                    await incrementRuleHit(aliasResult.hitRuleId);
+                }
+
                 // Normalize name
                 const normName = normalizeToolName(block.name);
                 block.name = normName;
@@ -876,12 +935,33 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
                 // Save original args
                 traceData.originalToolArgs = block.input;
 
-                // Repair args
+                // Apply arg alias rules
+                const argAliasResult = await applyArgAliasRules(normName, block.input, rules);
+                block.input = argAliasResult.repairedInput;
+                if (argAliasResult.hitRuleId) {
+                    await incrementRuleHit(argAliasResult.hitRuleId);
+                    traceData.toolArgsRepaired = true;
+                }
+
+                // Repair args fallback
                 const { repairedInput, repaired } = repairToolArgs(normName, block.input);
                 block.input = repairedInput;
                 traceData.repairedToolArgs = repairedInput;
                 if (repaired) {
                     traceData.toolArgsRepaired = true;
+                }
+
+                // Apply dangerous bash command rules
+                if (normName === "Bash" && block.input?.command) {
+                    const blockCheck = await checkBashBlockRules(block.input.command, rules);
+                    if (blockCheck.blocked) {
+                        firstValidationError = `Dangerous command blocked: ${blockCheck.reason}`;
+                        traceData.toolValidationError = firstValidationError;
+                        if (blockCheck.hitRuleId) {
+                            await incrementRuleHit(blockCheck.hitRuleId);
+                        }
+                        break;
+                    }
                 }
 
                 // Scheme validation
@@ -909,6 +989,16 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
         traceData.toolRetryUsed = true;
 
         try {
+            // Apply retry hint rule
+            let retryHint = "";
+            const hintResult = await getRetryHintRule(validation.errorReason, rules);
+            if (hintResult.hint) {
+                retryHint = `\nHint: ${hintResult.hint}`;
+                if (hintResult.hitRuleId) {
+                    await incrementRuleHit(hintResult.hitRuleId);
+                }
+            }
+
             // Append previous invalid assistant response + retry instruction user message
             const retryMessages = [
                 ...messages,
@@ -918,7 +1008,7 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
                 },
                 {
                     role: "user",
-                    content: `Your previous tool call was invalid: ${validation.errorReason}. Return exactly one valid tool_use. Do not explain.`
+                    content: `Your previous tool call was invalid: ${validation.errorReason}. Return exactly one valid tool_use. Do not explain.${retryHint}`
                 }
             ];
 
@@ -953,7 +1043,7 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
             model: "qwen-agent",
             stop_reason: "end_turn",
             stop_sequence: null,
-            usage: responseBody.usage || { input_tokens: 0, output_tokens: 0 }
+            usage: responseBody?.usage || { input_tokens: 0, output_tokens: 0 }
         };
 
         traceData.success = false;
@@ -961,6 +1051,7 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
         traceData.finalAnswerPreview = fallbackText;
 
         await saveQwenAgentTrace(traceData);
+        await updateProfileStats(profileName, false);
 
         console.log(JSON.stringify({
             time: new Date().toISOString(),
@@ -993,6 +1084,7 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
     traceData.finalAnswerPreview = answerText;
 
     await saveQwenAgentTrace(traceData);
+    await updateProfileStats(profileName, true);
 
     console.log(JSON.stringify({
         time: new Date().toISOString(),
@@ -1150,3 +1242,26 @@ export async function getQwenAgentTracesSummary(req: Request, res: Response) {
         res.status(500).json({ error: err.message });
     }
 }
+
+// Wrappers for exact trace logger function names requested in Phase 1
+export async function insertQwenAgentTrace(traceData: any) {
+    return saveQwenAgentTrace(traceData);
+}
+
+export function sanitizeTracePayload(payload: any): any {
+    return sanitizeObject(payload);
+}
+
+export function truncateTracePayload(trace: any, maxChars: number): any {
+    return truncateTraceSize(trace, maxChars);
+}
+
+export async function exportQwenAgentTracesJsonl(req: Request, res: Response) {
+    req.query.format = "jsonl";
+    return exportQwenAgentTraces(req, res);
+}
+
+export async function getQwenAgentTraceSummary(req: Request, res: Response) {
+    return getQwenAgentTracesSummary(req, res);
+}
+

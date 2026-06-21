@@ -9,15 +9,20 @@
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg-color: #0b0f19;
-            --card-bg: rgba(20, 26, 46, 0.6);
-            --card-border: rgba(255, 255, 255, 0.08);
-            --accent-color: #3b82f6;
-            --accent-glow: rgba(59, 130, 246, 0.35);
-            --success-color: #10b981;
-            --success-glow: rgba(16, 185, 129, 0.3);
+            --bg-color: #0b0c10;
+            --card-bg: rgba(22, 23, 29, 0.45);
+            --card-border: rgba(255, 255, 255, 0.06);
+            --accent-color: #ffffff;
+            --accent-glow: rgba(255, 255, 255, 0.1);
+            --success-color: #4ade80;
+            --success-glow: rgba(74, 222, 128, 0.15);
+            --error-color: #f87171;
+            --error-glow: rgba(248, 113, 113, 0.15);
+            --warning-color: #fbbf24;
+            --warning-glow: rgba(251, 191, 36, 0.15);
             --text-main: #f3f4f6;
-            --text-muted: #9ca3af;
+            --text-muted: #8e939e;
+            --header-border: rgba(255, 255, 255, 0.06);
         }
 
         * {
@@ -35,64 +40,99 @@
             flex-direction: column;
             align-items: center;
             justify-content: flex-start;
-            padding: 2rem 1rem;
+            padding: 2rem 1.5rem;
             overflow-x: hidden;
             background-image: 
-                radial-gradient(at 0% 0%, rgba(59, 130, 246, 0.1) 0px, transparent 50%),
-                radial-gradient(at 100% 100%, rgba(16, 185, 129, 0.05) 0px, transparent 50%);
+                radial-gradient(at 10% 10%, rgba(255, 255, 255, 0.02) 0px, transparent 40%),
+                radial-gradient(at 90% 90%, rgba(74, 222, 128, 0.01) 0px, transparent 40%);
         }
 
         header {
             width: 100%;
-            max-width: none;
+            max-width: 1560px;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 1.5rem;
-            padding-bottom: 1rem;
-            border-bottom: 1px solid var(--card-border);
+            margin-bottom: 2rem;
+            padding-bottom: 1.25rem;
+            border-bottom: 1px solid var(--header-border);
+        }
+
+        .header-logo {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .logo-dot {
+            width: 8px;
+            height: 8px;
+            background-color: var(--success-color);
+            border-radius: 50%;
+            box-shadow: 0 0 10px var(--success-glow);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(0.95); opacity: 0.5; }
+            50% { transform: scale(1.05); opacity: 1; }
+            100% { transform: scale(0.95); opacity: 0.5; }
         }
 
         h1 {
-            font-size: 1.8rem;
+            font-size: 1.4rem;
             font-weight: 600;
-            background: linear-gradient(135deg, #fff 30%, #a5b4fc 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+            letter-spacing: -0.02em;
+            color: #ffffff;
         }
 
         .controls {
             display: flex;
             align-items: center;
-            gap: 1rem;
+            gap: 0.75rem;
         }
 
         select, button, input {
-            background-color: rgba(17, 24, 39, 0.8);
+            background-color: rgba(18, 19, 24, 0.85);
             border: 1px solid var(--card-border);
             color: var(--text-main);
-            padding: 0.6rem 1.2rem;
+            padding: 0.6rem 1rem;
             border-radius: 8px;
             font-family: inherit;
-            font-size: 0.9rem;
+            font-size: 0.85rem;
             outline: none;
-            transition: all 0.2s ease-in-out;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
         }
 
-        select:hover, button:hover {
-            border-color: var(--accent-color);
+        select:hover, button:hover, input:hover {
+            border-color: rgba(255, 255, 255, 0.2);
             cursor: pointer;
         }
 
         button.primary {
-            background-color: var(--accent-color);
-            border-color: var(--accent-color);
-            font-weight: 500;
+            background-color: #ffffff;
+            border-color: #ffffff;
+            color: #0b0c10;
+            font-weight: 600;
         }
 
         button.primary:hover {
-            box-shadow: 0 0 15px var(--accent-glow);
+            box-shadow: 0 0 20px rgba(255, 255, 255, 0.15);
             transform: translateY(-1px);
+            background-color: #f3f4f6;
+            border-color: #f3f4f6;
+        }
+
+        button.danger {
+            background-color: rgba(248, 113, 113, 0.08);
+            border-color: rgba(248, 113, 113, 0.15);
+            color: var(--error-color);
+        }
+
+        button.danger:hover {
+            background-color: rgba(248, 113, 113, 0.15);
+            border-color: rgba(248, 113, 113, 0.3);
+            color: #fca5a5;
         }
 
         .dashboard-container {
@@ -106,31 +146,33 @@
         .summary-grid {
             display: grid;
             grid-template-columns: repeat(4, minmax(0, 1fr));
-            gap: 1rem;
+            gap: 1.25rem;
         }
 
         .qwen-grid {
             display: grid;
             grid-template-columns: repeat(5, minmax(0, 1fr));
-            gap: 1rem;
+            gap: 1.25rem;
         }
 
         .card {
             background: var(--card-bg);
-            backdrop-filter: blur(12px);
+            backdrop-filter: blur(16px);
             border: 1px solid var(--card-border);
-            border-radius: 8px;
-            padding: 1.25rem;
+            border-radius: 12px;
+            padding: 1.5rem;
             display: flex;
             flex-direction: column;
             position: relative;
             overflow: hidden;
-            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s;
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s, box-shadow 0.3s;
         }
 
         .card:hover {
-            transform: translateY(-4px);
-            border-color: rgba(255, 255, 255, 0.15);
+            transform: translateY(-3px);
+            border-color: rgba(255, 255, 255, 0.12);
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.05);
         }
 
         .card::before {
@@ -138,9 +180,10 @@
             position: absolute;
             top: 0;
             left: 0;
-            width: 4px;
-            height: 100%;
-            background-color: var(--accent-color);
+            width: 100%;
+            height: 2px;
+            background-color: transparent;
+            transition: background-color 0.3s;
         }
 
         .card.saving::before {
@@ -148,29 +191,33 @@
         }
 
         .card-title {
-            font-size: 0.78rem;
+            font-size: 0.72rem;
+            font-weight: 600;
             text-transform: uppercase;
-            letter-spacing: 0.05em;
+            letter-spacing: 0.08em;
             color: var(--text-muted);
-            margin-bottom: 0.7rem;
+            margin-bottom: 0.8rem;
         }
 
         .card-value {
-            font-size: 1.65rem;
+            font-size: 1.8rem;
             font-weight: 700;
-            margin-bottom: 0.4rem;
+            color: #ffffff;
+            margin-bottom: 0.5rem;
             overflow-wrap: anywhere;
+            letter-spacing: -0.02em;
         }
 
         .card-sub {
-            font-size: 0.8rem;
+            font-size: 0.78rem;
             color: var(--text-muted);
-            line-height: 1.35;
+            line-height: 1.4;
         }
 
         .metric-reason {
-            font-size: 1rem;
-            line-height: 1.25;
+            font-size: 0.95rem;
+            font-weight: 500;
+            line-height: 1.3;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -178,10 +225,11 @@
 
         .recent-section {
             background: var(--card-bg);
-            backdrop-filter: blur(12px);
+            backdrop-filter: blur(16px);
             border: 1px solid var(--card-border);
-            border-radius: 8px;
-            padding: 1.25rem;
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.03);
         }
 
         .section-header {
@@ -189,128 +237,160 @@
             justify-content: space-between;
             align-items: center;
             gap: 1rem;
-            margin-bottom: 1rem;
+            margin-bottom: 1.25rem;
+        }
+
+        .section-header h2 {
+            font-size: 1.15rem;
+            font-weight: 600;
+            letter-spacing: -0.01em;
+            color: #ffffff;
         }
 
         .table-wrapper {
             width: 100%;
             overflow-x: auto;
             border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.04);
+        }
+
+        .table-wrapper::-webkit-scrollbar {
+            height: 6px;
+        }
+        .table-wrapper::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.01);
+            border-radius: 3px;
+        }
+        .table-wrapper::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+        }
+        .table-wrapper::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.2);
         }
 
         table {
             width: 100%;
-            min-width: 1480px;
+            min-width: 1540px;
             border-collapse: collapse;
             text-align: left;
             table-layout: fixed;
-            font-size: 0.82rem;
+            font-size: 0.8rem;
         }
 
         th, td {
-            padding: 0.75rem 0.65rem;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            padding: 0.8rem 0.75rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
             vertical-align: top;
         }
 
         th {
+            background-color: rgba(255, 255, 255, 0.01);
             color: var(--text-muted);
-            font-weight: 500;
+            font-weight: 600;
             line-height: 1.2;
+            text-transform: uppercase;
+            font-size: 0.72rem;
+            letter-spacing: 0.05em;
         }
 
-        th:nth-child(1), td:nth-child(1) { width: 82px; }
-        th:nth-child(2), td:nth-child(2) { width: 112px; }
-        th:nth-child(3), td:nth-child(3) { width: 150px; }
+        th:nth-child(1), td:nth-child(1) { width: 85px; }
+        th:nth-child(2), td:nth-child(2) { width: 110px; }
+        th:nth-child(3), td:nth-child(3) { width: 160px; }
         th:nth-child(4), td:nth-child(4),
         th:nth-child(5), td:nth-child(5),
-        th:nth-child(6), td:nth-child(6) { width: 76px; }
-        th:nth-child(7), td:nth-child(7) { width: 150px; }
+        th:nth-child(6), td:nth-child(6) { width: 85px; }
+        th:nth-child(7), td:nth-child(7) { width: 140px; }
         th:nth-child(8), td:nth-child(8) { width: 120px; }
-        th:nth-child(9), td:nth-child(9) { width: 190px; }
+        th:nth-child(9), td:nth-child(9) { width: 180px; }
         th:nth-child(10), td:nth-child(10) { width: 160px; }
-        th:nth-child(11), td:nth-child(11) { width: 78px; }
+        th:nth-child(11), td:nth-child(11) { width: 80px; }
         th:nth-child(12), td:nth-child(12) { width: 230px; }
-        th:nth-child(13), td:nth-child(13) { width: 96px; }
+        th:nth-child(13), td:nth-child(13) { width: 95px; }
         th:nth-child(14), td:nth-child(14),
-        th:nth-child(15), td:nth-child(15) { width: 82px; }
+        th:nth-child(15), td:nth-child(15) { width: 85px; }
 
         tr:hover td {
-            background-color: rgba(255, 255, 255, 0.02);
+            background-color: rgba(255, 255, 255, 0.01);
+        }
+
+        tr:last-child td {
+            border-bottom: none;
         }
 
         .badge {
             display: inline-block;
-            padding: 0.25rem 0.6rem;
-            border-radius: 6px;
-            font-size: 0.75rem;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.7rem;
             font-weight: 600;
             text-transform: uppercase;
             max-width: 100%;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
+            letter-spacing: 0.02em;
         }
 
         .badge.deepseek {
-            background-color: rgba(59, 130, 246, 0.15);
-            color: #60a5fa;
-            border: 1px solid rgba(59, 130, 246, 0.3);
+            background-color: rgba(255, 255, 255, 0.05);
+            color: #ffffff;
+            border: 1px solid rgba(255, 255, 255, 0.15);
         }
 
         .badge.qwen {
-            background-color: rgba(16, 185, 129, 0.15);
-            color: #34d399;
-            border: 1px solid rgba(16, 185, 129, 0.3);
+            background-color: rgba(255, 255, 255, 0.03);
+            color: #d1d5db;
+            border: 1px solid rgba(255, 255, 255, 0.08);
         }
 
         .badge.green {
-            background-color: rgba(16, 185, 129, 0.15);
-            color: #34d399;
-            border: 1px solid rgba(16, 185, 129, 0.3);
+            background-color: rgba(74, 222, 128, 0.06);
+            color: var(--success-color);
+            border: 1px solid rgba(74, 222, 128, 0.15);
         }
 
         .badge.red {
-            background-color: rgba(239, 68, 68, 0.15);
-            color: #f87171;
-            border: 1px solid rgba(239, 68, 68, 0.3);
+            background-color: rgba(248, 113, 113, 0.06);
+            color: var(--error-color);
+            border: 1px solid rgba(248, 113, 113, 0.15);
         }
 
         .badge.yellow {
-            background-color: rgba(245, 158, 11, 0.15);
-            color: #fbbf24;
-            border: 1px solid rgba(245, 158, 11, 0.3);
+            background-color: rgba(251, 191, 36, 0.06);
+            color: var(--warning-color);
+            border: 1px solid rgba(251, 191, 36, 0.15);
         }
 
         .badge.blue {
-            background-color: rgba(59, 130, 246, 0.15);
-            color: #60a5fa;
-            border: 1px solid rgba(59, 130, 246, 0.3);
+            background-color: rgba(255, 255, 255, 0.04);
+            color: #cbd5e1;
+            border: 1px solid rgba(255, 255, 255, 0.1);
         }
 
         .badge.gray {
-            background-color: rgba(156, 163, 175, 0.12);
-            color: #d1d5db;
-            border: 1px solid rgba(156, 163, 175, 0.22);
+            background-color: rgba(255, 255, 255, 0.02);
+            color: #9ca3af;
+            border: 1px solid rgba(255, 255, 255, 0.05);
         }
 
         .cell-muted {
             color: var(--text-muted);
-            font-size: 0.78rem;
+            font-size: 0.74rem;
             line-height: 1.35;
-            margin-top: 0.35rem;
+            margin-top: 0.3rem;
         }
 
         .cell-stack {
             display: flex;
             flex-direction: column;
-            gap: 0.35rem;
+            gap: 0.25rem;
             min-width: 120px;
         }
 
         .fix-hint {
-            color: #d1d5db;
-            font-size: 0.82rem;
+            color: #cbd5e1;
+            font-size: 0.78rem;
             line-height: 1.35;
         }
 
@@ -323,80 +403,51 @@
         }
 
         .model-cell {
-            font-weight: 600;
+            font-weight: 500;
+            color: #ffffff;
             line-height: 1.25;
             overflow-wrap: anywhere;
         }
 
-        @media (max-width: 1250px) {
-            .summary-grid,
-            .qwen-grid {
-                grid-template-columns: repeat(2, minmax(0, 1fr));
-            }
-
-            header,
-            .section-header {
-                align-items: flex-start;
-                flex-direction: column;
-            }
-
-            .controls {
-                flex-wrap: wrap;
-            }
-        }
-
-        @media (max-width: 720px) {
-            body {
-                padding: 1rem 0.75rem;
-            }
-
-            .summary-grid,
-            .qwen-grid {
-                grid-template-columns: 1fr;
-            }
-
-            .card,
-            .recent-section {
-                padding: 1rem;
-            }
-        }
-
         .auth-container {
             width: 100%;
-            max-width: 420px;
-            margin-top: 10vh;
+            max-width: 400px;
+            margin-top: 15vh;
             background: var(--card-bg);
-            backdrop-filter: blur(12px);
+            backdrop-filter: blur(16px);
             border: 1px solid var(--card-border);
-            border-radius: 20px;
+            border-radius: 16px;
             padding: 2.5rem;
             display: flex;
             flex-direction: column;
             gap: 1.5rem;
-            box-shadow: 0 20px 40px rgba(0,0,0,0.4);
+            box-shadow: 0 20px 50px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255, 255, 255, 0.03);
         }
 
         .auth-container h2 {
-            font-size: 1.5rem;
+            font-size: 1.3rem;
             font-weight: 600;
             text-align: center;
+            color: #ffffff;
+            letter-spacing: -0.01em;
         }
 
         .auth-container input {
             width: 100%;
             padding: 0.8rem 1rem;
-            font-size: 1rem;
+            font-size: 0.95rem;
+            background-color: rgba(14, 15, 20, 0.7);
         }
 
         .auth-container button {
             width: 100%;
             padding: 0.8rem;
-            font-size: 1rem;
+            font-size: 0.95rem;
         }
 
         .error-msg {
-            color: #ef4444;
-            font-size: 0.85rem;
+            color: var(--error-color);
+            font-size: 0.8rem;
             text-align: center;
             display: none;
         }
@@ -408,13 +459,141 @@
             left: 0;
             right: 0;
             bottom: 0;
-            background: rgba(11, 15, 25, 0.8);
-            backdrop-filter: blur(4px);
+            background: rgba(11, 12, 16, 0.85);
+            backdrop-filter: blur(8px);
             z-index: 100;
             align-items: center;
             justify-content: center;
-            font-size: 1.2rem;
+            font-size: 1.1rem;
             font-weight: 500;
+            letter-spacing: 0.02em;
+        }
+
+        /* Responsive Layouts */
+        @media (max-width: 1280px) {
+            .summary-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+            .qwen-grid {
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
+        }
+
+        @media (max-width: 1024px) {
+            .qwen-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+        }
+
+        @media (max-width: 768px) {
+            body {
+                padding: 1.5rem 1rem;
+            }
+
+            header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 1rem;
+            }
+
+            .controls {
+                width: 100%;
+                justify-content: space-between;
+                flex-wrap: wrap;
+                gap: 0.5rem;
+            }
+
+            .controls > * {
+                flex: 1 1 calc(50% - 0.5rem);
+                text-align: center;
+            }
+
+            .summary-grid, .qwen-grid {
+                grid-template-columns: 1fr;
+                gap: 1rem;
+            }
+
+            .card {
+                padding: 1.25rem;
+            }
+
+            .recent-section {
+                padding: 1.25rem;
+            }
+
+            .section-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 0.75rem;
+            }
+
+            .section-header .controls {
+                width: 100%;
+            }
+
+            /* Responsive Table Card Layout */
+            .table-wrapper {
+                border: none;
+                overflow-x: visible;
+            }
+
+            table, thead, tbody, th, td, tr {
+                display: block;
+            }
+
+            thead {
+                display: none;
+            }
+
+            tr {
+                background: rgba(255, 255, 255, 0.015);
+                border: 1px solid rgba(255, 255, 255, 0.05);
+                border-radius: 12px;
+                margin-bottom: 1.25rem;
+                padding: 1rem 1.25rem;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            }
+
+            tr:hover td {
+                background-color: transparent;
+            }
+
+            td {
+                display: flex;
+                justify-content: space-between;
+                align-items: flex-start;
+                padding: 0.5rem 0;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+                width: 100% !important;
+                text-align: right;
+            }
+
+            td::before {
+                content: attr(data-label);
+                font-weight: 600;
+                font-size: 0.72rem;
+                text-transform: uppercase;
+                color: var(--text-muted);
+                text-align: left;
+                margin-right: 1.5rem;
+                letter-spacing: 0.04em;
+            }
+
+            td:last-child {
+                border-bottom: none;
+            }
+
+            .cell-stack {
+                align-items: flex-end;
+            }
+
+            .cell-muted {
+                text-align: right;
+            }
+
+            .fix-hint {
+                text-align: right;
+            }
         }
     </style>
 </head>
@@ -433,13 +612,16 @@
     <!-- Dashboard Main -->
     <div class="dashboard-container" id="dashboardContainer">
         <header>
-            <h1>Railway AI Gateway v0.3.1</h1>
+            <div class="header-logo">
+                <div class="logo-dot"></div>
+                <h1>Railway AI Gateway v0.3.1</h1>
+            </div>
             <div class="controls">
                 <select id="rangeSelect" onchange="loadData()">
                     <option value="today">Today</option>
                     <option value="all">All Time</option>
                 </select>
-                <button onclick="clearData()" style="background-color: rgba(239, 68, 68, 0.15); border-color: rgba(239, 68, 68, 0.3); color: #f87171;">Clear Logs</button>
+                <button class="danger" onclick="clearData()">Clear Logs</button>
                 <button onclick="logout()">Logout</button>
             </div>
         </header>
@@ -600,16 +782,16 @@
             return isQwenCall(call) &&
                 call.qwen_patch_valid === false &&
                 [
-                    "qwen_anchor_not_found",
-                    "qwen_anchor_ambiguous",
-                    "qwen_anchor_id_invalid",
-                    "qwen_file_mismatch",
-                    "qwen_format_violation_diff",
-                    "qwen_markdown_violation",
-                    "qwen_tool_use_violation",
-                    "qwen_empty_new_code",
-                    "qwen_json_parse_failed",
-                    "qwen_large_draft"
+                     "qwen_anchor_not_found",
+                     "qwen_anchor_ambiguous",
+                     "qwen_anchor_id_invalid",
+                     "qwen_file_mismatch",
+                     "qwen_format_violation_diff",
+                     "qwen_markdown_violation",
+                     "qwen_tool_use_violation",
+                     "qwen_empty_new_code",
+                     "qwen_json_parse_failed",
+                     "qwen_large_draft"
                 ].includes(reason);
         }
 
@@ -776,21 +958,21 @@
 
                 return `
                     <tr>
-                        <td>${date}</td>
-                        <td><span class="badge ${providerClass}">${providerText}</span></td>
-                        <td><span class="model-cell" title="${escapeHtml(call.model)}">${escapeHtml(call.model)}</span></td>
-                        <td>${inputTokens.toLocaleString()}</td>
-                        <td>${outputTokens.toLocaleString()}</td>
-                        <td>${totalTokens.toLocaleString()}</td>
-                        <td><div class="cell-stack">${badge(patchMode, patchMode === "invalid" ? "red" : "gray")}${modeDetail}</div></td>
-                        <td>${getStatusBadge(call)}</td>
-                        <td>${getReasonBadge(call.fallback_reason)}</td>
-                        <td>${isQwenCall(call) ? getContextBadge(call) : `<span class="cell-muted">-</span>`}</td>
-                        <td>${retry}</td>
-                        <td><div class="fix-hint" title="${escapeHtml(fixHint)}">${escapeHtml(fixHint)}</div></td>
-                        <td>${latency.toLocaleString()} ms</td>
-                        <td>${cost}</td>
-                        <td style="color: ${Number(call.saved_usd) > 0 ? 'var(--success-color)' : 'inherit'}">${saved}</td>
+                        <td data-label="Time">${date}</td>
+                        <td data-label="Provider"><span class="badge ${providerClass}">${providerText}</span></td>
+                        <td data-label="Model"><span class="model-cell" title="${escapeHtml(call.model)}">${escapeHtml(call.model)}</span></td>
+                        <td data-label="Input Tokens">${inputTokens.toLocaleString()}</td>
+                        <td data-label="Output Tokens">${outputTokens.toLocaleString()}</td>
+                        <td data-label="Total Tokens">${totalTokens.toLocaleString()}</td>
+                        <td data-label="Patch Mode"><div class="cell-stack">${badge(patchMode, patchMode === "invalid" ? "red" : "gray")}${modeDetail}</div></td>
+                        <td data-label="Patch Status">${getStatusBadge(call)}</td>
+                        <td data-label="Fallback Reason">${getReasonBadge(call.fallback_reason)}</td>
+                        <td data-label="Context Source">${isQwenCall(call) ? getContextBadge(call) : `<span class="cell-muted">-</span>`}</td>
+                        <td data-label="Retry">${retry}</td>
+                        <td data-label="Fix Hint"><div class="fix-hint" title="${escapeHtml(fixHint)}">${escapeHtml(fixHint)}</div></td>
+                        <td data-label="Latency">${latency.toLocaleString()} ms</td>
+                        <td data-label="Cost">${cost}</td>
+                        <td data-label="Saved" style="color: ${Number(call.saved_usd) > 0 ? 'var(--success-color)' : 'inherit'}">${saved}</td>
                     </tr>
                 `;
             }).join("");

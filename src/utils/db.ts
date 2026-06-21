@@ -130,7 +130,76 @@ export async function initDb() {
             );
         `);
 
+        // Create adapter tuning tables
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS qwen_adapter_rules (
+                id SERIAL PRIMARY KEY,
+                enabled BOOLEAN DEFAULT true,
+                rule_type VARCHAR(50) NOT NULL,
+                match_pattern VARCHAR(255) NOT NULL,
+                replacement TEXT,
+                description TEXT,
+                hit_count INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS qwen_prompt_profiles (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(255) UNIQUE NOT NULL,
+                enabled BOOLEAN DEFAULT false,
+                system_prompt TEXT NOT NULL,
+                purpose TEXT,
+                success_count INTEGER DEFAULT 0,
+                failure_count INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
+        // Create background job tables
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS auto_coding_jobs (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                status VARCHAR(50) NOT NULL,
+                user_task TEXT NOT NULL,
+                mode VARCHAR(50) NOT NULL,
+                repo_path VARCHAR(500) NOT NULL,
+                branch_name VARCHAR(255),
+                model_worker VARCHAR(255) DEFAULT 'qwen-agent',
+                controller_model VARCHAR(255),
+                current_step INTEGER DEFAULT 0,
+                max_steps INTEGER DEFAULT 12,
+                success BOOLEAN,
+                failure_reason TEXT,
+                summary TEXT
+            );
+        `);
+
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS auto_coding_job_events (
+                id SERIAL PRIMARY KEY,
+                job_id INTEGER REFERENCES auto_coding_jobs(id) ON DELETE CASCADE,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                step INTEGER,
+                event_type VARCHAR(100),
+                payload JSONB
+            );
+        `);
+
         // Safely add columns to existing tables
+        await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS prompt_profile_name VARCHAR(255);`);
+        await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS prompt_profile_version VARCHAR(50);`);
+        await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS controller_plan TEXT;`);
+        await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS controller_review TEXT;`);
+        await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS qwen_worker_trace_ids VARCHAR(255)[];`);
+        await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS final_result TEXT;`);
+        await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS accepted BOOLEAN;`);
+
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS input_cost_usd NUMERIC(12, 6) DEFAULT 0;`);
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS input_cost_thb NUMERIC(12, 6) DEFAULT 0;`);
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS output_cost_usd NUMERIC(12, 6) DEFAULT 0;`);
@@ -156,6 +225,14 @@ export async function initDb() {
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS direct_edit_eligible BOOLEAN;`);
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS qwen_anchor_id VARCHAR(32);`);
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS qwen_anchor_candidate_count INTEGER;`);
+
+        // Insert default prompt profile if it does not exist
+        const defaultPrompt = "You are connected to Claude Code tools.\nUse real tool_use calls when reading or editing files.\nDo not print JSON tool calls as text.\nUse Read before Edit unless you already have exact file content.\nPrefer small edits.\nAfter tool_result, continue the task or give final answer.\nDo not invent file paths.";
+        await pool.query(`
+            INSERT INTO qwen_prompt_profiles (name, enabled, system_prompt, purpose)
+            VALUES ('qwen-agent-default', true, $1, 'Default system instructions for Qwen Agent')
+            ON CONFLICT (name) DO NOTHING;
+        `, [defaultPrompt]);
 
         console.log("Database tables initialized successfully.");
     } catch (err) {

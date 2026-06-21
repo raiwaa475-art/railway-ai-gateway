@@ -1,6 +1,7 @@
 import { Router } from "express";
 import crypto from "crypto";
 import path from "path";
+import * as fs from "fs";
 import { authMiddleware } from "../auth.js";
 import { sanitizeAnthropicResponse } from "../providers/deepseek.js";
 import { SUPPORTED_MODELS } from "../config/models.js";
@@ -13,6 +14,10 @@ import { ProviderService } from "../utils/provider-service.js";
 import { createOpenAiToAnthropicStream } from "../utils/stream-handler.js";
 import { extractDeepSeekUsage, calculateDeepSeekCost } from "../utils/pricing.js";
 import { exportQwenAgentTraces, getQwenAgentTracesSummary } from "../routing/qwen-agent.js";
+import { qwenTuningRouter } from "./qwen-tuning-routes.js";
+import { handleQwenSmartV2Request } from "../routing/qwen-smart-v2.js";
+import { AutoJobManager } from "../routing/auto-workflow.js";
+import { buildDataset, buildEvalSet, getDatasetFilePath } from "../routing/dataset-pipeline.js";
 
 export const gatewayRouter = Router();
 
@@ -539,6 +544,57 @@ gatewayRouter.post("/v1/messages", authMiddleware, async (req, res) => {
         return;
     }
 
+    if (clientModel === "qwen-smart-v2" || clientModel === "smart-qwen") {
+        logRequest({
+            type: "request",
+            requestId,
+            method: req.method,
+            path: req.path,
+            clientModel,
+            upstreamModel: "qwen-smart-v2",
+            stream: isStream,
+            provider: "qwen-local"
+        });
+        try {
+            (req as any).requestId = requestId;
+            await handleQwenSmartV2Request(req, res);
+            logRequest({
+                type: "response",
+                requestId,
+                method: req.method,
+                path: req.path,
+                clientModel,
+                upstreamModel: "qwen-smart-v2",
+                status: res.statusCode || 200,
+                latencyMs: Date.now() - startTime,
+                stream: isStream,
+                provider: "qwen-local"
+            });
+        } catch (err: any) {
+            logRequest({
+                type: "response",
+                requestId,
+                method: req.method,
+                path: req.path,
+                clientModel,
+                upstreamModel: "qwen-smart-v2",
+                status: 500,
+                latencyMs: Date.now() - startTime,
+                stream: isStream,
+                errorMessage: err.message,
+                provider: "qwen-local"
+            });
+            await updateGatewayRequest(requestId, 500, Date.now() - startTime);
+            res.status(500).json({
+                error: {
+                    type: "gateway_error",
+                    message: err.message || "Unknown error inside Qwen Smart Controller"
+                }
+            });
+        }
+        return;
+    }
+
     if (clientModel === "qwen-only-low-risk") {
         logRequest({
             type: "request",
@@ -1004,6 +1060,159 @@ gatewayRouter.get("/admin/usage/recent", adminAuthMiddleware, async (req, res) =
 
 gatewayRouter.get("/admin/qwen-agent/traces/export", adminAuthMiddleware, exportQwenAgentTraces);
 gatewayRouter.get("/admin/qwen-agent/traces/summary", adminAuthMiddleware, getQwenAgentTracesSummary);
+
+// Phase 2 - Adapter rules & prompt profiles endpoints
+gatewayRouter.use("/admin/qwen-agent", adminAuthMiddleware, qwenTuningRouter);
+
+// Phase 4 - Auto Coding Jobs endpoints
+gatewayRouter.post("/admin/auto/jobs", adminAuthMiddleware, async (req, res) => {
+    try {
+        const job = await AutoJobManager.createJob(req.body);
+        res.status(201).json(job);
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+gatewayRouter.get("/admin/auto/jobs", adminAuthMiddleware, async (req, res) => {
+    try {
+        const jobs = await AutoJobManager.listJobs();
+        res.json(jobs);
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+gatewayRouter.get("/admin/auto/jobs/:id", adminAuthMiddleware, async (req, res) => {
+    try {
+        const job = await AutoJobManager.getJob(Number(req.params.id));
+        if (!job) {
+            return res.status(404).json({ error: "Job not found" });
+        }
+        
+        let events: any[] = [];
+        if (pool) {
+            const evRes = await pool.query(
+                "SELECT * FROM auto_coding_job_events WHERE job_id = $1 ORDER BY timestamp ASC",
+                [job.id]
+            );
+            events = evRes.rows;
+        }
+
+        res.json({ ...job, events });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+gatewayRouter.post("/admin/auto/jobs/:id/cancel", adminAuthMiddleware, async (req, res) => {
+    try {
+        const ok = await AutoJobManager.cancelJob(Number(req.params.id));
+        res.json({ ok });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+gatewayRouter.post("/admin/auto/jobs/:id/retry", adminAuthMiddleware, async (req, res) => {
+    try {
+        const job = await AutoJobManager.getJob(Number(req.params.id));
+        if (!job) {
+            return res.status(404).json({ error: "Job not found" });
+        }
+        const newJob = await AutoJobManager.createJob({
+            user_task: job.user_task,
+            repo_path: job.repo_path,
+            branch_name: job.branch_name || undefined,
+            mode: job.mode,
+            model_worker: job.model_worker,
+            controller_model: job.controller_model || undefined
+        });
+        res.status(201).json(newJob);
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+gatewayRouter.get("/admin/auto/summary", adminAuthMiddleware, async (req, res) => {
+    if (!pool) return res.json({});
+    try {
+        const totalRes = await pool.query("SELECT COUNT(*) FROM auto_coding_jobs");
+        const completedRes = await pool.query("SELECT COUNT(*) FROM auto_coding_jobs WHERE status = 'completed'");
+        const failedRes = await pool.query("SELECT COUNT(*) FROM auto_coding_jobs WHERE status = 'failed'");
+        const humanRes = await pool.query("SELECT COUNT(*) FROM auto_coding_jobs WHERE status = 'needs_human'");
+        
+        const durationRes = await pool.query(
+            "SELECT AVG(EXTRACT(EPOCH FROM (updated_at - created_at))) as avg_dur FROM auto_coding_jobs WHERE status IN ('completed', 'failed')"
+        );
+        const roundsRes = await pool.query("SELECT AVG(current_step) as avg_rounds FROM auto_coding_jobs WHERE status = 'completed'");
+        
+        const buildPassRes = await pool.query("SELECT COUNT(*) FROM auto_coding_job_events WHERE event_type = 'build_check_passed'");
+        const buildFailRes = await pool.query("SELECT COUNT(*) FROM auto_coding_job_events WHERE event_type = 'build_check_failed'");
+        const buildPass = parseInt(buildPassRes.rows[0].count, 10);
+        const buildFail = parseInt(buildFailRes.rows[0].count, 10);
+        const buildPassRate = (buildPass + buildFail) > 0 ? Number((buildPass / (buildPass + buildFail)).toFixed(4)) : 1;
+
+        const reviewPassRes = await pool.query(
+            "SELECT COUNT(*) FROM auto_coding_job_events WHERE event_type = 'review_completed' AND payload->>'review_result' = 'pass'"
+        );
+        const reviewFailRes = await pool.query(
+            "SELECT COUNT(*) FROM auto_coding_job_events WHERE event_type = 'review_completed' AND payload->>'review_result' = 'needs_fix'"
+        );
+        const reviewPass = parseInt(reviewPassRes.rows[0].count, 10);
+        const reviewFail = parseInt(reviewFailRes.rows[0].count, 10);
+        const reviewPassRate = (reviewPass + reviewFail) > 0 ? Number((reviewPass / (reviewPass + reviewFail)).toFixed(4)) : 1;
+
+        const savingsRes = await pool.query("SELECT COALESCE(SUM(saved_usd), 0) as saved_usd, COALESCE(SUM(saved_thb), 0) as saved_thb FROM model_calls");
+
+        res.json({
+            totalJobs: parseInt(totalRes.rows[0].count, 10),
+            completed: parseInt(completedRes.rows[0].count, 10),
+            failed: parseInt(failedRes.rows[0].count, 10),
+            needsHuman: parseInt(humanRes.rows[0].count, 10),
+            averageDurationSeconds: durationRes.rows[0].avg_dur ? Number(Number(durationRes.rows[0].avg_dur).toFixed(2)) : 0,
+            averageQwenToolRounds: roundsRes.rows[0].avg_rounds ? Number(Number(roundsRes.rows[0].avg_rounds).toFixed(2)) : 0,
+            buildPassRate,
+            controllerReviewPassRate: reviewPassRate,
+            costEstimateSavedUsd: Number(Number(savingsRes.rows[0].saved_usd).toFixed(4)),
+            costEstimateSavedThb: Number(Number(savingsRes.rows[0].saved_thb).toFixed(2))
+        });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Phase 5 - SFT Dataset Pipeline endpoints
+gatewayRouter.post("/admin/qwen-agent/datasets/build", adminAuthMiddleware, async (req, res) => {
+    try {
+        const datasetId = await buildDataset(req.body);
+        res.status(201).json({ datasetId });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+gatewayRouter.get("/admin/qwen-agent/datasets/:id/download", adminAuthMiddleware, async (req, res) => {
+    try {
+        const filePath = getDatasetFilePath(req.params.id);
+        if (!fs.existsSync(filePath)) {
+            return res.status(404).json({ error: "Dataset file not found" });
+        }
+        res.setHeader("content-type", "application/x-jsonlines");
+        res.sendFile(filePath);
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+gatewayRouter.post("/admin/qwen-agent/datasets/build-eval", adminAuthMiddleware, async (req, res) => {
+    try {
+        const evalSetId = await buildEvalSet();
+        res.status(201).json({ evalSetId });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
 
 gatewayRouter.post("/admin/usage/clear", adminAuthMiddleware, async (req, res) => {
     if (!pool) {

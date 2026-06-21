@@ -49,5 +49,12 @@ export const config = {
     qwenAgentToolRetryLimit: Number(process.env.QWEN_AGENT_TOOL_RETRY_LIMIT || 1),
     qwenAgentTraceEnabled: process.env.QWEN_AGENT_TRACE_ENABLED === "true",
     qwenAgentTraceSanitize: process.env.QWEN_AGENT_TRACE_SANITIZE !== "false",
-    qwenAgentTraceMaxChars: Number(process.env.QWEN_AGENT_TRACE_MAX_CHARS || 20000)
+    qwenAgentTraceMaxChars: Number(process.env.QWEN_AGENT_TRACE_MAX_CHARS || 20000),
+    smartControllerEnabled: process.env.SMART_CONTROLLER_ENABLED !== "false",
+    smartControllerModel: process.env.SMART_CONTROLLER_MODEL || "deepseek-v4-flash",
+    smartControllerMaxReviewRounds: Number(process.env.SMART_CONTROLLER_MAX_REVIEW_ROUNDS || 2),
+    smartControllerAllowClaude: process.env.SMART_CONTROLLER_ALLOW_CLAUDE === "true",
+    autoCodingEnabled: process.env.AUTO_CODING_ENABLED === "true",
+    autoCodingMaxSteps: Number(process.env.AUTO_CODING_MAX_STEPS || 12),
+    autoCodingRequireHumanApproval: process.env.AUTO_CODING_REQUIRE_HUMAN_APPROVAL !== "false"
 };
