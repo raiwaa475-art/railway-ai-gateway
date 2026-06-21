@@ -493,7 +493,14 @@ async function main() {
         calls: 1
     }, (body) => {
         createToolsOffered = body.tools || [];
-        return { content: [{ type: "text", text: "done" }] };
+        return {
+            content: [{
+                type: "tool_use",
+                id: "t_create_test",
+                name: "Write",
+                input: { file_path: "src/test.ts", content: "export const x = 1" }
+            }]
+        };
     });
     const createToolNames = createToolsOffered.map((t: any) => t.name);
     assert.ok(createToolNames.includes("Write"), "Should offer Write");
@@ -515,7 +522,14 @@ async function main() {
         calls: 1
     }, (body) => {
         fixToolsOffered = body.tools || [];
-        return { content: [{ type: "text", text: "done" }] };
+        return {
+            content: [{
+                type: "tool_use",
+                id: "t_fix_test",
+                name: "Edit",
+                input: { file_path: "src/test.ts", old_string: "x = 1", new_string: "x = 2" }
+            }]
+        };
     });
     const fixToolNames = fixToolsOffered.map((t: any) => t.name);
     assert.ok(fixToolNames.includes("Edit"), "Should offer Edit");
@@ -568,6 +582,141 @@ async function main() {
         };
     });
     assert.equal(resBlocked.stop_reason, "end_turn");
+
+    // 20b. Edit Enforcement - Success after Retry (สร้างไฟล์)
+    let enforceCalls = 0;
+    const resEnforceCreate = await runCase("enforce_create_file", {
+        model: "qwen-agent",
+        stream: false,
+        messages: [{ role: "user", content: "สร้างไฟล์ src/test.ts ใส่ export const x = 1" }],
+        tools: [
+            { name: "Write", description: "write file", input_schema: {} },
+            { name: "Edit", description: "edit file", input_schema: {} }
+        ]
+    }, {
+        status: 200,
+        calls: 2,
+        typeMatch: "tool_use"
+    }, (body) => {
+        enforceCalls++;
+        if (enforceCalls === 1) {
+            // First call returns text only
+            return { content: [{ type: "text", text: "Here is the file content you asked for." }] };
+        } else {
+            // Second call returns correct tool use
+            return {
+                content: [{
+                    type: "tool_use",
+                    id: "t_create_retry",
+                    name: "Write",
+                    input: { file_path: "src/test.ts", content: "export const x = 1" }
+                }]
+            };
+        }
+    });
+    assert.equal(resEnforceCreate.content[0].name, "Write");
+
+    // 20c. Edit Enforcement - Success after Retry (แก้ไฟล์)
+    enforceCalls = 0;
+    const resEnforceEdit = await runCase("enforce_edit_file", {
+        model: "qwen-agent",
+        stream: false,
+        messages: [{ role: "user", content: "แก้ src/test.ts จาก x = 1 เป็น x = 2" }],
+        tools: [
+            { name: "Write", description: "write file", input_schema: {} },
+            { name: "Edit", description: "edit file", input_schema: {} }
+        ]
+    }, {
+        status: 200,
+        calls: 2,
+        typeMatch: "tool_use"
+    }, (body) => {
+        enforceCalls++;
+        if (enforceCalls === 1) {
+            return { content: [{ type: "text", text: "I will update the file." }] };
+        } else {
+            return {
+                content: [{
+                    type: "tool_use",
+                    id: "t_edit_retry",
+                    name: "Edit",
+                    input: { file_path: "src/test.ts", old_string: "x = 1", new_string: "x = 2" }
+                }]
+            };
+        }
+    });
+    assert.equal(resEnforceEdit.content[0].name, "Edit");
+
+    // 20d. Edit Enforcement - Success after Retry (เพิ่ม endpoint)
+    enforceCalls = 0;
+    const resEnforceAdd = await runCase("enforce_add_endpoint", {
+        model: "qwen-agent",
+        stream: false,
+        messages: [{ role: "user", content: "เพิ่ม endpoint /healthz ใน src/server.ts" }],
+        tools: [
+            { name: "Write", description: "write file", input_schema: {} },
+            { name: "Edit", description: "edit file", input_schema: {} }
+        ]
+    }, {
+        status: 200,
+        calls: 2,
+        typeMatch: "tool_use"
+    }, (body) => {
+        enforceCalls++;
+        if (enforceCalls === 1) {
+            return { content: [{ type: "text", text: "Adding /healthz." }] };
+        } else {
+            return {
+                content: [{
+                    type: "tool_use",
+                    id: "t_add_retry",
+                    name: "Edit",
+                    input: { file_path: "src/server.ts", old_string: "app.listen", new_string: "app.get('/healthz')\napp.listen" }
+                }]
+            };
+        }
+    });
+    assert.equal(resEnforceAdd.content[0].name, "Edit");
+
+    // 20e. Edit Enforcement - Negative test case (อธิบายไฟล์ - should NOT enforce)
+    enforceCalls = 0;
+    const resNoEnforceExplain = await runCase("no_enforce_explain", {
+        model: "qwen-agent",
+        stream: false,
+        messages: [{ role: "user", content: "อธิบาย src/server.ts ทำงานยังไง" }],
+        tools: [
+            { name: "Write", description: "write file", input_schema: {} },
+            { name: "Edit", description: "edit file", input_schema: {} }
+        ]
+    }, {
+        status: 200,
+        calls: 1, // should succeed immediately, no retry
+        typeMatch: "text",
+        textMatch: "This file handles server initialization"
+    }, (body) => {
+        enforceCalls++;
+        return { content: [{ type: "text", text: "This file handles server initialization" }] };
+    });
+
+    // 20f. Edit Enforcement - Retry failure path (still returns text, returns safe final message)
+    enforceCalls = 0;
+    const resEnforceFailed = await runCase("enforce_failed_safe_message", {
+        model: "qwen-agent",
+        stream: false,
+        messages: [{ role: "user", content: "สร้างไฟล์ src/test.ts ใส่ export const x = 1" }],
+        tools: [
+            { name: "Write", description: "write file", input_schema: {} },
+            { name: "Edit", description: "edit file", input_schema: {} }
+        ]
+    }, {
+        status: 200,
+        calls: 2,
+        typeMatch: "text",
+        textMatch: "Edit intent was detected, but no edit tool was produced."
+    }, (body) => {
+        enforceCalls++;
+        return { content: [{ type: "text", text: "Here is text only." }] };
+    });
 
     // 21. Check traces export and summary
     const expRes = new FakeResponse();

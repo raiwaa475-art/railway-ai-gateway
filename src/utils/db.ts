@@ -126,7 +126,12 @@ export async function initDb() {
                 build_status VARCHAR(50),
                 success BOOLEAN,
                 failure_reason TEXT,
-                human_verdict VARCHAR(50) DEFAULT 'unknown'
+                human_verdict VARCHAR(50) DEFAULT 'unknown',
+                edit_intent_detected BOOLEAN DEFAULT false,
+                edit_tool_required BOOLEAN DEFAULT false,
+                edit_tool_missing BOOLEAN DEFAULT false,
+                edit_tool_enforcement_retry_used BOOLEAN DEFAULT false,
+                edit_tool_enforcement_failed BOOLEAN DEFAULT false
             );
         `);
 
@@ -206,6 +211,11 @@ export async function initDb() {
         await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS allowed_tools TEXT[];`);
         await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS blocked_by_intent_gate BOOLEAN;`);
         await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS blocked_tool_name VARCHAR(255);`);
+        await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS edit_intent_detected BOOLEAN DEFAULT false;`);
+        await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS edit_tool_required BOOLEAN DEFAULT false;`);
+        await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS edit_tool_missing BOOLEAN DEFAULT false;`);
+        await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS edit_tool_enforcement_retry_used BOOLEAN DEFAULT false;`);
+        await pool.query(`ALTER TABLE qwen_agent_traces ADD COLUMN IF NOT EXISTS edit_tool_enforcement_failed BOOLEAN DEFAULT false;`);
 
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS input_cost_usd NUMERIC(12, 6) DEFAULT 0;`);
         await pool.query(`ALTER TABLE model_calls ADD COLUMN IF NOT EXISTS input_cost_thb NUMERIC(12, 6) DEFAULT 0;`);

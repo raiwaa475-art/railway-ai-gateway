@@ -186,6 +186,41 @@ function getFileContextSource(messages: any[]): "tool_result_exact" | "tool_resu
     return "none";
 }
 
+function containsFilePathOrName(text: string): boolean {
+    const normalized = text.toLowerCase();
+    // Common file extensions
+    const extRegex = /\b[a-zA-Z0-9_\-]+\.(?:tsx?|jsx?|json|html?|css|txt|md|ya?ml|sh|jsonl|rs|go|c|cpp|h|cs|java|rb|php|sql)\b/i;
+    // Path indicators
+    const pathRegex = /[a-zA-Z0-9_\-]+\/[a-zA-Z0-9_\-\.\/]+/i;
+    // Thai/English file keywords
+    const keywordRegex = /\b(?:file|filename)\b|ไฟล์/i;
+    
+    return extRegex.test(normalized) || pathRegex.test(normalized) || keywordRegex.test(normalized);
+}
+
+function hasEditIntentKeywords(text: string): boolean {
+    const normalized = text.toLowerCase();
+    const englishKeywords = /\b(create|write|edit|update|change|replace|add|delete|refactor|patch|modify|insert|remove)\b/i;
+    const thaiKeywords = /สร้าง|แก้|แก้ไข|ปรับ|ปรับปรุง|อัพเดต|อัปเดต|เปลี่ยน|แทนที่|เพิ่ม|ใส่|ลบ|รีแฟกเตอร์/i;
+    return englishKeywords.test(normalized) || thaiKeywords.test(normalized);
+}
+
+function hasExplainOrQuestionIntent(text: string): boolean {
+    const normalized = text.toLowerCase();
+    const questionPatterns = [
+        "explain", "description", "describe", "understand", "what is", "how do", "how can", "why did", "where is", "where are", "how does", "what does",
+        "อธิบาย", "อย่างไร", "ยังไง", "ทำไม", "ที่ไหน", "อะไร", "คืออะไร", "ทำงานอย่างไร", "ทำงานยังไง"
+    ];
+    return questionPatterns.some(pat => normalized.includes(pat));
+}
+
+function isEditToolRequired(intentMode: string, promptText: string): boolean {
+    if (intentMode !== "edit_allowed") return false;
+    if (!containsFilePathOrName(promptText)) return false;
+    if (hasExplainOrQuestionIntent(promptText)) return false;
+    return hasEditIntentKeywords(promptText);
+}
+
 // Extract fake JSON tool use from text response block
 function parseFakeToolJson(text: string): FakeToolCall | null {
     if (!text || typeof text !== "string") return null;
@@ -806,8 +841,8 @@ async function saveQwenAgentTrace(traceData: any) {
             try {
                 await pool.query(
                     `INSERT INTO qwen_agent_traces 
-                    (request_id, timestamp, mode, user_intent, sanitized_messages, available_tool_names, qwen_raw_output, fake_tool_json_detected, fake_tool_json_converted, requested_tool_name, normalized_tool_name, original_tool_args, repaired_tool_args, tool_args_repaired, tool_validation_error, tool_retry_used, tool_round_count, tool_result_preview, final_answer_preview, edited_files, build_status, success, failure_reason, human_verdict, prompt_profile_name, prompt_profile_version, controller_plan, controller_review, qwen_worker_trace_ids, final_result, accepted, repo_key, duplicate_tool_call_blocked, forced_final_after_successful_edit, max_tool_rounds_reached, intent_mode, allowed_tools, blocked_by_intent_gate, blocked_tool_name) 
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39)
+                    (request_id, timestamp, mode, user_intent, sanitized_messages, available_tool_names, qwen_raw_output, fake_tool_json_detected, fake_tool_json_converted, requested_tool_name, normalized_tool_name, original_tool_args, repaired_tool_args, tool_args_repaired, tool_validation_error, tool_retry_used, tool_round_count, tool_result_preview, final_answer_preview, edited_files, build_status, success, failure_reason, human_verdict, prompt_profile_name, prompt_profile_version, controller_plan, controller_review, qwen_worker_trace_ids, final_result, accepted, repo_key, duplicate_tool_call_blocked, forced_final_after_successful_edit, max_tool_rounds_reached, intent_mode, allowed_tools, blocked_by_intent_gate, blocked_tool_name, edit_intent_detected, edit_tool_required, edit_tool_missing, edit_tool_enforcement_retry_used, edit_tool_enforcement_failed) 
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44)
                     ON CONFLICT (request_id) DO UPDATE SET
                     timestamp = EXCLUDED.timestamp,
                     mode = EXCLUDED.mode,
@@ -846,7 +881,12 @@ async function saveQwenAgentTrace(traceData: any) {
                     intent_mode = EXCLUDED.intent_mode,
                     allowed_tools = EXCLUDED.allowed_tools,
                     blocked_by_intent_gate = EXCLUDED.blocked_by_intent_gate,
-                    blocked_tool_name = EXCLUDED.blocked_tool_name`,
+                    blocked_tool_name = EXCLUDED.blocked_tool_name,
+                    edit_intent_detected = EXCLUDED.edit_intent_detected,
+                    edit_tool_required = EXCLUDED.edit_tool_required,
+                    edit_tool_missing = EXCLUDED.edit_tool_missing,
+                    edit_tool_enforcement_retry_used = EXCLUDED.edit_tool_enforcement_retry_used,
+                    edit_tool_enforcement_failed = EXCLUDED.edit_tool_enforcement_failed`,
                     [
                         sanitized.requestId,
                         new Date(sanitized.timestamp || Date.now()),
@@ -886,7 +926,12 @@ async function saveQwenAgentTrace(traceData: any) {
                         sanitized.intentMode || null,
                         sanitized.allowedTools || null,
                         sanitized.blockedByIntentGate !== undefined ? sanitized.blockedByIntentGate : null,
-                        sanitized.blockedToolName || null
+                        sanitized.blockedToolName || null,
+                        sanitized.editIntentDetected !== undefined ? sanitized.editIntentDetected : null,
+                        sanitized.editToolRequired !== undefined ? sanitized.editToolRequired : null,
+                        sanitized.editToolMissing !== undefined ? sanitized.editToolMissing : null,
+                        sanitized.editToolEnforcementRetryUsed !== undefined ? sanitized.editToolEnforcementRetryUsed : null,
+                        sanitized.editToolEnforcementFailed !== undefined ? sanitized.editToolEnforcementFailed : null
                     ]
                 );
 
@@ -976,7 +1021,12 @@ async function readAllTraces(): Promise<any[]> {
                 intentMode: row.intent_mode,
                 allowedTools: row.allowed_tools,
                 blockedByIntentGate: row.blocked_by_intent_gate,
-                blockedToolName: row.blocked_tool_name
+                blockedToolName: row.blocked_tool_name,
+                editIntentDetected: row.edit_intent_detected,
+                editToolRequired: row.edit_tool_required,
+                editToolMissing: row.edit_tool_missing,
+                editToolEnforcementRetryUsed: row.edit_tool_enforcement_retry_used,
+                editToolEnforcementFailed: row.edit_tool_enforcement_failed
             }));
         } catch (dbErr) {
             console.error("Failed to read traces from DB, reading from JSONL file instead:", dbErr);
@@ -1041,6 +1091,8 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
                        "";
     const repoKey = rawRepoKey ? normalizeRepoKey(rawRepoKey) : "";
 
+    const isEditEnforceActive = isEditToolRequired(intentMode, promptText);
+
     // Build initial trace values
     const traceData: any = {
         requestId,
@@ -1075,7 +1127,12 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
         intentMode,
         allowedTools,
         blockedByIntentGate: false,
-        blockedToolName: null
+        blockedToolName: null,
+        editIntentDetected: isEditEnforceActive,
+        editToolRequired: isEditEnforceActive,
+        editToolMissing: false,
+        editToolEnforcementRetryUsed: false,
+        editToolEnforcementFailed: false
     };
 
     // Populate build status / result preview from historical last action
@@ -1384,24 +1441,36 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
 
     let validation = await processAgentResponse(processedResponse);
 
-    // 4. Compact retry once if validation fails
-    if (!validation.valid && validation.errorReason) {
-        firstValidationErrorReason = validation.errorReason;
-        hasRetryHappened = true;
-        traceData.toolRetryUsed = true;
+    // Check if edit tool is missing
+    const firstToolBlocks = (processedResponse.content || []).filter((b: any) => b?.type === "tool_use");
+    const firstHasEditTool = firstToolBlocks.some((b: any) => ["Write", "Edit", "MultiEdit"].includes(b.name));
+    const firstEditToolMissing = isEditEnforceActive && !firstHasEditTool;
 
-        try {
+    // 4. Compact retry once if validation fails OR if edit enforcement is active and missing edit tool
+    if ((!validation.valid && validation.errorReason) || firstEditToolMissing) {
+        hasRetryHappened = true;
+
+        let retryUserContent = "";
+        if (firstEditToolMissing) {
+            traceData.editToolEnforcementRetryUsed = true;
+            retryUserContent = "This is an edit task. You must use Write, Edit, or MultiEdit. Do not answer with text only.";
+        } else {
+            firstValidationErrorReason = validation.errorReason;
+            traceData.toolRetryUsed = true;
             // Apply retry hint rule
             let retryHint = "";
-            const hintResult = await getRetryHintRule(validation.errorReason, rules);
+            const hintResult = await getRetryHintRule(validation.errorReason || "", rules);
             if (hintResult.hint) {
                 retryHint = `\nHint: ${hintResult.hint}`;
                 if (hintResult.hitRuleId) {
                     await incrementRuleHit(hintResult.hitRuleId);
                 }
             }
+            retryUserContent = `Your previous tool call was invalid: ${validation.errorReason}. Return exactly one valid tool_use. Do not explain.${retryHint}`;
+        }
 
-            // Append previous invalid assistant response + retry instruction user message
+        try {
+            // Append previous response + retry instruction user message
             const retryMessages = [
                 ...messages,
                 {
@@ -1410,7 +1479,7 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
                 },
                 {
                     role: "user",
-                    content: `Your previous tool call was invalid: ${validation.errorReason}. Return exactly one valid tool_use. Do not explain.${retryHint}`
+                    content: retryUserContent
                 }
             ];
 
@@ -1435,6 +1504,26 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
         } catch (err: any) {
             console.error("Retry attempt failed:", err);
         }
+    }
+
+    // After retry, check if we still need to enforce and the edit tool is missing
+    const finalToolBlocks = (processedResponse.content || []).filter((b: any) => b?.type === "tool_use");
+    const finalHasEditTool = finalToolBlocks.some((b: any) => ["Write", "Edit", "MultiEdit"].includes(b.name));
+    const finalEditToolMissing = isEditEnforceActive && !finalHasEditTool;
+
+    if (finalEditToolMissing) {
+        traceData.editToolMissing = true;
+        traceData.editToolEnforcementFailed = true;
+
+        // Return a safe final message
+        processedResponse.content = [{
+            type: "text",
+            text: "Edit intent was detected, but no edit tool was produced. Please specify the exact file path and requested change."
+        }];
+        processedResponse.stop_reason = "end_turn";
+
+        // Treat validation as failed so success is false
+        validation = { valid: false, errorReason: "Edit tool enforcement failed" };
     }
 
     // Check duplicate, early stop, or intent gate if response has valid tool calls
@@ -1547,7 +1636,9 @@ export async function handleQwenAgentRequest(req: Request, res: Response): Promi
 
     if (!validation.valid) {
         // Validation failed twice
-        const fallbackText = "Qwen-agent failed to produce a valid tool call.";
+        const fallbackText = validation.errorReason === "Edit tool enforcement failed"
+            ? "Edit intent was detected, but no edit tool was produced. Please specify the exact file path and requested change."
+            : "Qwen-agent failed to produce a valid tool call.";
         const failedResponse = {
             id: "msg_qwen_failed_" + Math.random().toString(36).substring(7),
             type: "message",
@@ -1796,7 +1887,12 @@ export async function exportQwenAgentTraces(req: Request, res: Response) {
                     intentMode: t.intentMode,
                     allowedTools: t.allowedTools,
                     blockedByIntentGate: t.blockedByIntentGate,
-                    blockedToolName: t.blockedToolName
+                    blockedToolName: t.blockedToolName,
+                    editIntentDetected: t.editIntentDetected,
+                    editToolRequired: t.editToolRequired,
+                    editToolMissing: t.editToolMissing,
+                    editToolEnforcementRetryUsed: t.editToolEnforcementRetryUsed,
+                    editToolEnforcementFailed: t.editToolEnforcementFailed
                 }
             };
         });
